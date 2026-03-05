@@ -2,6 +2,7 @@
 import os
 import re
 import uuid
+import json
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 
@@ -27,6 +28,15 @@ TAB_CONOCIMIENTO_AI = os.environ.get("TAB_CONOCIMIENTO_AI", "Conocimiento_AI").s
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "").strip()
 TWILIO_AUTH_TOKEN  = os.environ.get("TWILIO_AUTH_TOKEN", "").strip()
 TWILIO_WHATSAPP_NUMBER = os.environ.get("TWILIO_WHATSAPP_NUMBER", "").strip()
+
+# ✅ Plantilla aprobada: Nuevo caso asignado (abogada)
+# Body sugerido (3 vars):
+# Nuevo caso asignado (aviso automático).
+# Cliente: {{1}}
+# Teléfono: {{2}}
+# Detalle del caso: {{3}}
+# Favor de dar seguimiento.
+WA_TPL_ABOGADA_NUEVO_CASO_SID = os.environ.get("WA_TPL_ABOGADA_NUEVO_CASO_SID", "").strip()
 
 # OpenAI (opcional)
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
@@ -55,16 +65,67 @@ def _get_twilio_client() -> Client:
         raise RuntimeError("Faltan credenciales de Twilio (TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN).")
     return Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
+def _to_e164(raw: str) -> str:
+    """
+    Normaliza teléfono para WhatsApp (E.164).
+    Acepta +52..., 521..., 55..., etc.
+    """
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    # deja + y dígitos
+    s = "".join([c for c in s if c.isdigit() or c == "+"])
+    if not s:
+        return ""
+    if s.startswith("whatsapp:"):
+        s = s.replace("whatsapp:", "")
+    # si no trae +, asumimos MX
+    if not s.startswith("+"):
+        s = s.lstrip("0")
+        if not s.startswith("52"):
+            s = "52" + s
+        s = "+" + s
+    return s
+
 def send_whatsapp_safe(to_number: str, body: str):
-    """Envía WhatsApp y NO truena el job: regresa (ok, detail)."""
+    """Envía WhatsApp (sesión) y NO truena el job: regresa (ok, detail)."""
     try:
         if not TWILIO_WHATSAPP_NUMBER:
             return (False, "Falta TWILIO_WHATSAPP_NUMBER.")
         client = _get_twilio_client()
         msg = client.messages.create(
             from_=_wa_addr(TWILIO_WHATSAPP_NUMBER),
-            to=_wa_addr(to_number),
+            to=_wa_addr(to_number if str(to_number).startswith("whatsapp:") else _to_e164(to_number)),
             body=body
+        )
+        return (True, f"SID={getattr(msg, 'sid', '')}")
+    except TwilioRestException as e:
+        code = getattr(e, "code", "")
+        return (False, f"TwilioRestException {code}: {str(e)}")
+    except Exception as e:
+        return (False, f"{type(e).__name__}: {e}")
+
+def send_whatsapp_template_safe(to_number: str, template_sid: str, variables: dict):
+    """
+    Envía WhatsApp usando plantilla (Twilio Content API).
+    variables: dict con llaves "1","2","3"... (strings)
+    """
+    try:
+        if not TWILIO_WHATSAPP_NUMBER:
+            return (False, "Falta TWILIO_WHATSAPP_NUMBER.")
+        if not template_sid:
+            return (False, "Falta template SID (content_sid).")
+
+        to_e164 = _to_e164(to_number)
+        if not to_e164:
+            return (False, "Número destino inválido.")
+
+        client = _get_twilio_client()
+        msg = client.messages.create(
+            from_=_wa_addr(TWILIO_WHATSAPP_NUMBER),
+            to=_wa_addr(to_e164),
+            content_sid=template_sid,
+            content_variables=json.dumps(variables, ensure_ascii=False)
         )
         return (True, f"SID={getattr(msg, 'sid', '')}")
     except TwilioRestException as e:
@@ -106,6 +167,16 @@ def _clip_words(text: str, max_words: int) -> str:
     if len(words) <= max_words:
         return (text or "").strip()
     return " ".join(words[:max_words]).rstrip() + "…"
+
+def _safe_update(ws, row_num: int, payload: dict, hmap: dict):
+    """
+    Actualiza solo columnas existentes (para evitar errores si no existen columnas en Sheets).
+    """
+    if not payload:
+        return
+    clean = {k: v for k, v in payload.items() if k in hmap}
+    if clean:
+        update_row_cells(ws, row_num, clean, hmap=hmap)
 
 def read_sys_config(ws_sys) -> dict:
     values = get_all_values_safe(ws_sys)
@@ -402,17 +473,10 @@ def build_analisis_web_gpt(
     ini: date,
     fin: date,
     temas: list,
-    total_estimado: float = 0.0,          # ✅ nuevo (para personalizar)
-    componentes: dict | None = None,      # ✅ nuevo (para personalizar)
-    abogado_nombre: str = ""              # ✅ nuevo (para personalizar)
+    total_estimado: float = 0.0,
+    componentes: dict | None = None,
+    abogado_nombre: str = ""
 ):
-    """
-    - Empático + profesional
-    - Legal claro sin jerga pesada
-    - 230–290 palabras aprox (objetivo ~250)
-    - Usa Conocimiento_AI si existe
-    - Leyenda final fija
-    """
     tipo_h = "Despido" if str(tipo_caso).strip() == "1" else ("Renuncia" if str(tipo_caso).strip() == "2" else "Caso laboral")
     desc = (descripcion or "").strip()
     antig = years_of_service(ini, fin)
@@ -427,9 +491,8 @@ def build_analisis_web_gpt(
     nPV  = float(comp.get("Prima_Vac_Prop") or 0.0)
 
     def fallback():
-        # Fallback también ~250 palabras (sin “machote” tanto como se pueda)
         intro = (
-            f"{nombre}, gracias por contarnos tu caso. Entendemos que esta situación puede generar mucha incertidumbre. "
+            f"{nombre}, gracias por contarnos tu caso. Entendemos que esta situación puede generar incertidumbre. "
             f"Con la información disponible, lo ubicamos como {tipo_h} con una antigüedad aproximada de {antig_txt} "
             f"(del {ini.isoformat()} al {fin.isoformat()}) y un salario mensual considerado de ${salario_mensual:,.2f} "
             f"(salario diario aproximado ${sd:,.2f})."
@@ -439,34 +502,30 @@ def build_analisis_web_gpt(
 
         cuerpo = (
             "Este estimado es referencial y puede cambiar al confirmar salario integrado real, pagos previos y prestaciones adicionales. "
-            "En términos prácticos, el cálculo se compone de prestaciones proporcionales (aguinaldo, vacaciones y prima vacacional) "
-            + ("y, al tratarse de despido, puede incluir indemnización (90 días) y prima de antigüedad." if str(tipo_caso).strip()=="1" else
-               "y, según el caso, finiquito y pagos pendientes.")
+            "En términos prácticos, el cálculo considera prestaciones proporcionales (aguinaldo, vacaciones y prima vacacional) "
+            + ("y, al tratarse de despido, puede incluir indemnización (90 días) y prima de antigüedad." if str(tipo_caso).strip()=="1"
+               else "y pagos pendientes vinculados a finiquito, según lo efectivamente cubierto.")
         )
 
         pasos = (
             "Para personalizarlo con precisión, te recomendamos:\n"
-            "• Reúne recibos de nómina/transferencias, contrato o condiciones de trabajo y tu historial IMSS: esto confirma salario y fechas.\n"
-            "• No firmes renuncia, finiquito o documentos en blanco sin revisión: es la causa más común de perder margen de negociación.\n"
-            "• Guarda mensajes, correos o evidencia del motivo y del día del evento: ayuda a definir la estrategia y el alcance del reclamo.\n"
-            "Con esa información, una abogada revisa contigo el escenario y se decide la ruta más conveniente (negociación o acción legal) de acuerdo con evidencia."
+            "• Reunir recibos de nómina/transferencias, contrato (si existe) y tu historial IMSS: esto confirma salario y fechas.\n"
+            "• No firmar renuncia, finiquito o documentos en blanco sin revisión: evita perder margen de negociación.\n"
+            "• Guardar mensajes/correos/evidencia del motivo y del día del evento: ayuda a definir estrategia y alcance.\n"
+            "Con esa información, una abogada revisa contigo el escenario y se decide la ruta más conveniente (negociación o acción legal) conforme a evidencia."
         )
 
-        if abogado_nombre:
-            cierre = f"Tu abogada asignada es {abogado_nombre}; en breve te contactará para continuar el seguimiento."
-        else:
-            cierre = "En breve una abogada te contactará para continuar el seguimiento."
+        cierre = f"Tu abogada asignada es {abogado_nombre}; en breve te contactará para continuar el seguimiento." if abogado_nombre else \
+                 "En breve una abogada te contactará para continuar el seguimiento."
 
         txt = f"{intro}\n\n{cuerpo}\n\n{pasos}\n\n{cierre}"
-        # recorte seguro a ~280 palabras si se pasa
         if len(txt.split()) > 300:
-            txt = _clip_words(txt, 280)
+            txt = _clip_words(txt, 285)
         return txt + "\n\nOrientación informativa; no constituye asesoría legal definitiva."
 
     if not (OPENAI_API_KEY and OpenAI):
         return fallback()
 
-    # Contexto breve desde Conocimiento_AI (sin saturar)
     contexto_items = []
     for t in (temas or [])[:3]:
         titulo = (t.get("Titulo_Visible") or "Punto legal relevante").strip()
@@ -477,7 +536,6 @@ def build_analisis_web_gpt(
             contexto_items.append(f"- {titulo}")
     contexto = "\n".join(contexto_items).strip() or "(Sin entradas específicas; usa criterios generales de la LFT.)"
 
-    # Datos “duros” para que GPT no suene genérico
     comp_txt = (
         f"Montos estimados (si aplica): "
         f"90 días=${n90:,.2f}; prima antigüedad=${nPA:,.2f}; aguinaldo prop=${nAgu:,.2f}; "
@@ -497,7 +555,7 @@ def build_analisis_web_gpt(
                     "NO uses Markdown. "
                     "Objetivo: 230 a 290 palabras (ideal ~250). "
                     "Incluye 3 a 5 viñetas con '•' solo en la sección de pasos. "
-                    "Evita frases genéricas tipo 'en general'. Sé concreto con los datos proporcionados. "
+                    "Evita frases genéricas; usa los datos proporcionados. "
                     "No incluyas la leyenda final; el sistema la añadirá."
                 )
             },
@@ -511,12 +569,12 @@ def build_analisis_web_gpt(
                     f"- Salario mensual considerado: ${salario_mensual:,.2f} (SD aprox. ${sd:,.2f})\n"
                     f"- Descripción del usuario: {desc if desc else '(sin descripción)'}\n"
                     f"- {comp_txt}\n"
-                    f"- Abogada asignada (si existe): {(abogado_nombre or '(no especificada)')}\n\n"
+                    f"- Abogada asignada: {(abogado_nombre or '(no especificada)')}\n\n"
                     f"Base de conocimiento (usa solo lo relevante y de forma natural):\n{contexto}\n\n"
                     "Requisitos estrictos:\n"
                     "1) Empieza con empatía real y referencia breve a algo del relato (si hay descripción).\n"
-                    "2) Explica por qué el total es preliminar y qué factores lo mueven (salario integrado, pagos previos, documentos).\n"
-                    "3) Explica en 1 párrafo qué incluye el cálculo para este tipo de caso, usando al menos 3 montos del comp_txt.\n"
+                    "2) Explica por qué el total es preliminar y qué factores lo mueven.\n"
+                    "3) Explica en 1 párrafo qué incluye el cálculo para este tipo de caso, usando al menos 3 montos.\n"
                     "4) Da un plan de acción en viñetas (3 a 5) y en cada viñeta agrega una razón corta.\n"
                     "5) Cierra indicando que una abogada dará seguimiento por WhatsApp (menciona el nombre si se proporcionó).\n"
                 )
@@ -534,20 +592,15 @@ def build_analisis_web_gpt(
         if not txt:
             return fallback()
 
-        # Por si GPT mete la leyenda
         txt = re.sub(r"(?is)\n*orientación informativa;.*$", "", txt).strip()
 
-        # Control de longitud (palabras)
         w = len(txt.split())
         if w > 310:
             txt = _clip_words(txt, 285)
-
-        # Si quedó demasiado corto por cualquier razón, caemos a fallback
         if len(txt.split()) < 180:
             return fallback()
 
         return txt + "\n\nOrientación informativa; no constituye asesoría legal definitiva."
-
     except Exception:
         return fallback()
 
@@ -586,7 +639,7 @@ def upsert_abogados_admin(sh, lead_id: str, abogado_id: str):
             if c and 1 <= c <= len(row_out):
                 row_out[c - 1] = val
 
-        # ✅ Key para AppSheet
+        # Key para AppSheet
         id_admin = uuid.uuid4().hex[:12]
         set_cell("ID_Admin", id_admin)
 
@@ -638,6 +691,9 @@ def process_lead(lead_id: str):
     try:
         telefono = get("Telefono")
         nombre = get("Nombre") or "Hola"
+        apellido = get("Apellido")
+        cliente_full = (f"{nombre} {apellido}".strip() if apellido else nombre).strip()
+
         tipo_caso = get("Tipo_Caso")
         salario = money_to_float(get("Salario_Mensual"))
         descripcion = get("Descripcion_Situacion")
@@ -668,7 +724,6 @@ def process_lead(lead_id: str):
 
         temas = select_conocimiento(con_rows, descripcion, tipo_caso, k=3)
 
-        # ✅ ahora mandamos total + componentes + abogada para más personalización
         analisis_web = build_analisis_web_gpt(
             nombre=nombre,
             tipo_caso=tipo_caso,
@@ -696,6 +751,7 @@ def process_lead(lead_id: str):
             if tnorm:
                 link_abog = f"https://wa.me/{tnorm.replace('+','')}"
 
+        # WhatsApp al cliente (sesión / mensaje normal)
         mensaje_final = (
             f"✅ {nombre}, ya tengo tu *estimación preliminar*.\n\n"
             f"💰 *Total estimado:* ${total_estimado:,.2f}\n\n"
@@ -706,6 +762,7 @@ def process_lead(lead_id: str):
             mensaje_final += f"\n📄 Ver desglose en web: {link_reporte}\n"
         mensaje_final += "\n(Orientación informativa; no constituye asesoría legal.)"
 
+        # Guardar en Sheets (Web toma esto)
         update_row_cells(ws_leads, row, {
             "Analisis_AI": analisis_web,
             "Resultado_Calculo": desglose_txt,
@@ -733,8 +790,42 @@ def process_lead(lead_id: str):
             "Ultima_Actualizacion": now_iso(),
         }, hmap=h)
 
+        # Crear registro en Abogados_Admin (si existe)
         upsert_abogados_admin(sh, lead_id, abogado_id)
 
+        # ✅ Plantilla a la abogada (nuevo caso asignado) — SOLO ESTO en template
+        # Dedupe opcional: si existen columnas, no reenvía.
+        already_sent = ""
+        if "Notif_Abogada_NuevoCaso" in h:
+            try:
+                vals2 = with_backoff(ws_leads.row_values, row)
+                idx = h.get("Notif_Abogada_NuevoCaso")
+                already_sent = (vals2[idx-1] if idx and idx-1 < len(vals2) else "").strip()
+            except Exception:
+                already_sent = ""
+
+        if abogado_tel and not already_sent:
+            tipo_h = "Despido" if str(tipo_caso).strip() == "1" else ("Renuncia" if str(tipo_caso).strip() == "2" else "Caso")
+            total_txt = f"${total_estimado:,.2f} MXN"
+            detalle = f"Tipo: {tipo_h}\nTotal: {total_txt}\nReporte: {link_reporte or ''}"
+
+            okA, detA = send_whatsapp_template_safe(
+                to_number=abogado_tel,
+                template_sid=WA_TPL_ABOGADA_NUEVO_CASO_SID,
+                variables={
+                    "1": cliente_full or "Cliente",
+                    "2": _to_e164(telefono),
+                    "3": detalle
+                }
+            )
+
+            # marca de envío (solo si existen columnas)
+            _safe_update(ws_leads, row, {
+                "Notif_Abogada_NuevoCaso": now_iso(),
+                "Notif_Abogada_NuevoCaso_Det": (f"{okA} {detA}")[:240],
+            }, hmap=h)
+
+        # Enviar WhatsApp al cliente
         ok1, det1 = send_whatsapp_safe(telefono, mensaje_final)
 
         if ok1:
