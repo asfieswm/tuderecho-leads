@@ -29,9 +29,8 @@ TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "").strip()
 TWILIO_AUTH_TOKEN  = os.environ.get("TWILIO_AUTH_TOKEN", "").strip()
 TWILIO_WHATSAPP_NUMBER = os.environ.get("TWILIO_WHATSAPP_NUMBER", "").strip()
 
-# ✅ Plantilla aprobada: Nuevo caso asignado (abogada)
-# Body sugerido (3 vars):
-# Nuevo caso asignado (aviso automático).
+# ✅ Plantilla aprobada: Nuevo caso asignado (abogada) (3 variables)
+# Body:
 # Cliente: {{1}}
 # Teléfono: {{2}}
 # Detalle del caso: {{3}}
@@ -73,13 +72,11 @@ def _to_e164(raw: str) -> str:
     s = (raw or "").strip()
     if not s:
         return ""
-    # deja + y dígitos
     s = "".join([c for c in s if c.isdigit() or c == "+"])
     if not s:
         return ""
     if s.startswith("whatsapp:"):
         s = s.replace("whatsapp:", "")
-    # si no trae +, asumimos MX
     if not s.startswith("+"):
         s = s.lstrip("0")
         if not s.startswith("52"):
@@ -93,9 +90,10 @@ def send_whatsapp_safe(to_number: str, body: str):
         if not TWILIO_WHATSAPP_NUMBER:
             return (False, "Falta TWILIO_WHATSAPP_NUMBER.")
         client = _get_twilio_client()
+        to_e164 = to_number if str(to_number).startswith("whatsapp:") else _to_e164(to_number)
         msg = client.messages.create(
             from_=_wa_addr(TWILIO_WHATSAPP_NUMBER),
-            to=_wa_addr(to_number if str(to_number).startswith("whatsapp:") else _to_e164(to_number)),
+            to=_wa_addr(to_e164),
             body=body
         )
         return (True, f"SID={getattr(msg, 'sid', '')}")
@@ -105,10 +103,18 @@ def send_whatsapp_safe(to_number: str, body: str):
     except Exception as e:
         return (False, f"{type(e).__name__}: {e}")
 
+def _clean_var(v) -> str:
+    # asegura string, sin None, sin chars de control
+    s = "" if v is None else str(v)
+    s = s.replace("\r", " ").replace("\n", " ").strip()
+    s = re.sub(r"[\x00-\x1F\x7F]", " ", s)  # control chars
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
 def send_whatsapp_template_safe(to_number: str, template_sid: str, variables: dict):
     """
     Envía WhatsApp usando plantilla (Twilio Content API).
-    variables: dict con llaves "1","2","3"... (strings)
+    variables: {"1":"...", "2":"...", "3":"..."}
     """
     try:
         if not TWILIO_WHATSAPP_NUMBER:
@@ -120,12 +126,18 @@ def send_whatsapp_template_safe(to_number: str, template_sid: str, variables: di
         if not to_e164:
             return (False, "Número destino inválido.")
 
+        payload = {}
+        for k, v in (variables or {}).items():
+            payload[str(k)] = _clean_var(v)
+
+        content_vars = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
         client = _get_twilio_client()
         msg = client.messages.create(
             from_=_wa_addr(TWILIO_WHATSAPP_NUMBER),
             to=_wa_addr(to_e164),
             content_sid=template_sid,
-            content_variables=json.dumps(variables, ensure_ascii=False)
+            content_variables=content_vars
         )
         return (True, f"SID={getattr(msg, 'sid', '')}")
     except TwilioRestException as e:
@@ -169,9 +181,7 @@ def _clip_words(text: str, max_words: int) -> str:
     return " ".join(words[:max_words]).rstrip() + "…"
 
 def _safe_update(ws, row_num: int, payload: dict, hmap: dict):
-    """
-    Actualiza solo columnas existentes (para evitar errores si no existen columnas en Sheets).
-    """
+    """Actualiza solo columnas existentes."""
     if not payload:
         return
     clean = {k: v for k, v in payload.items() if k in hmap}
@@ -193,10 +203,7 @@ def read_sys_config(ws_sys) -> dict:
     return out
 
 def set_sys_value(ws_sys, key: str, value: str):
-    """
-    Escribe/actualiza en Config_Sistema (Clave/Valor).
-    Si no existe la clave, la agrega.
-    """
+    """Escribe/actualiza en Config_Sistema (Clave/Valor)."""
     key = (key or "").strip()
     if not key:
         return
@@ -223,37 +230,46 @@ def set_sys_value(ws_sys, key: str, value: str):
 
 def list_active_abogados(ws_abog):
     """
-    Regresa lista ordenada: [(ID, Nombre, Telefono), ...] solo activos.
-    Columnas esperadas: ID_Abogado, Nombre_Abogado, Telefono_Abogado, Activo
+    ✅ Compatible con tu hoja:
+      - ID: "Abogado"
+      - Nombre: "Nombre_Abogado"
+      - Tel: "Telefono_Aboga" o "Teléfono_Registro"
+      - Activo: "Activo"
     """
     h = build_header_map(ws_abog)
     rows = with_backoff(ws_abog.get_all_values)
     if not rows or len(rows) < 2:
         return []
 
-    def cell(r, name):
-        c = col_idx(h, name)
-        return (r[c-1] if c and c-1 < len(r) else "").strip()
+    def get_any(r, names):
+        for name in names:
+            if name in h:
+                c = col_idx(h, name)
+                val = (r[c-1] if c and c-1 < len(r) else "").strip()
+                if val:
+                    return val
+        return ""
 
     def is_active(r):
-        v = cell(r, "Activo").upper()
-        return v in ("SI", "SÍ", "TRUE", "1")
+        v = get_any(r, ["Activo"]).upper()
+        return v in ("SI", "SÍ", "TRUE", "1", "YES", "Y")
 
     out = []
     for r in rows[1:]:
-        aid = cell(r, "ID_Abogado")
+        aid = get_any(r, ["ID_Abogado", "Abogado", "ID"])
         if not aid or not is_active(r):
             continue
-        out.append((aid, cell(r, "Nombre_Abogado") or f"Abogada {aid}", cell(r, "Telefono_Abogado")))
+
+        nombre = get_any(r, ["Nombre_Abogado", "Nombre_Abogada", "Nombre_Abogad", "Nombre"]) or f"Abogada {aid}"
+        tel = get_any(r, ["Telefono_Aboga", "Telefono_Abogado", "Teléfono_Registro", "Telefono_Registro", "Telefono"])
+
+        out.append((aid, nombre, tel))
+
     out.sort(key=lambda x: x[0])
     return out
 
 def pick_abogado_secuencial(ws_abog, ws_sys, salario_mensual: float, syscfg: dict):
-    """
-    Regla:
-    - salario >= 50,000 => A01 (si está activo; si no, fallback primer activo)
-    - si no, round-robin entre activos usando Config_Sistema.Clave = ABOGADO_ULTIMO_ID
-    """
+    """VIP A01 si salario>=50k; si no, round-robin con ABOGADO_ULTIMO_ID."""
     activos = list_active_abogados(ws_abog)
     if not activos:
         return ("A01", "Abogada asignada", "")
@@ -319,7 +335,6 @@ def _parse_date_parts(h, vals, prefix: str) -> date:
     return date(y, m, d)
 
 def _last_anniversary(ini: date, fin: date) -> date:
-    """Último aniversario de ingreso antes (o igual) a la fecha fin."""
     try:
         ann = date(fin.year, ini.month, ini.day)
     except ValueError:
@@ -332,13 +347,6 @@ def _last_anniversary(ini: date, fin: date) -> date:
     return max(ann, ini)
 
 def calc_estimacion_detallada(tipo_caso: str, salario_mensual: float, ini: date, fin: date, salario_min_diario: float = 0.0):
-    """
-    YA NO calcula indemnización de 20 días.
-    Devuelve:
-      - desglose_texto
-      - total_estimado (float)
-      - componentes (dict)
-    """
     sd = salario_mensual / 30.0 if salario_mensual else 0.0
     y = years_of_service(ini, fin)
     y_int = int(y) if y > 0 else 0
@@ -359,9 +367,9 @@ def calc_estimacion_detallada(tipo_caso: str, salario_mensual: float, ini: date,
     prima_ant = sd_top * 12.0 * y if (sd_top and y > 0) else 0.0
 
     ind_90 = 0.0
-    ind_20 = 0.0  # siempre 0
+    ind_20 = 0.0
 
-    if str(tipo_caso).strip() == "1":  # Despido
+    if str(tipo_caso).strip() == "1":
         ind_90 = sd * 90.0
         total = ind_90 + prima_ant + aguinaldo_prop + vacaciones_prop + prima_vac_prop
 
@@ -380,7 +388,7 @@ def calc_estimacion_detallada(tipo_caso: str, salario_mensual: float, ini: date,
             f"TOTAL ESTIMADO: ${total:,.2f}\n\n"
             "Nota: el monto puede variar por salario integrado real, prestaciones adicionales, salarios caídos, topes vigentes y documentación."
         )
-    else:  # Renuncia
+    else:
         total = aguinaldo_prop + vacaciones_prop + prima_vac_prop
         prima_ant_ren = 0.0
         if y >= 15:
@@ -605,20 +613,12 @@ def build_analisis_web_gpt(
         return fallback()
 
 
-# --------------------
-# ✅ FIX AppSheet: Abogados_Admin debe generar ID_Admin (Key)
-# --------------------
 def upsert_abogados_admin(sh, lead_id: str, abogado_id: str):
-    """
-    Crea (si no existe) registro en Abogados_Admin con:
-      ID_Admin, ID_Lead, ID_Abogado, Estatus, Acepto_Asesoria, Enviar_Cuestionario, Proxima_Fecha_Evento, Notas
-    """
     try:
         ws = open_worksheet(sh, TAB_ABOG_ADMIN)
     except Exception:
         return
 
-    # si ya existe por ID_Lead, solo actualiza
     try:
         existing = find_row_by_value(ws, "ID_Lead", lead_id)
         if existing:
@@ -631,7 +631,6 @@ def upsert_abogados_admin(sh, lead_id: str, abogado_id: str):
     try:
         header = with_backoff(ws.row_values, 1)
         h = build_header_map(ws)
-
         row_out = [""] * len(header)
 
         def set_cell(col: str, val: str):
@@ -639,10 +638,7 @@ def upsert_abogados_admin(sh, lead_id: str, abogado_id: str):
             if c and 1 <= c <= len(row_out):
                 row_out[c - 1] = val
 
-        # Key para AppSheet
-        id_admin = uuid.uuid4().hex[:12]
-        set_cell("ID_Admin", id_admin)
-
+        set_cell("ID_Admin", uuid.uuid4().hex[:12])
         set_cell("ID_Lead", lead_id)
         set_cell("ID_Abogado", abogado_id)
         set_cell("Estatus", "ASIGNADO")
@@ -679,7 +675,6 @@ def process_lead(lead_id: str):
         c = col_idx(h, name)
         return (vals[c-1] if c and c-1 < len(vals) else "").strip()
 
-    # RUNNING
     update_row_cells(ws_leads, row, {
         "Procesar_AI_Status": "RUNNING",
         "Ultimo_Error": "",
@@ -751,7 +746,6 @@ def process_lead(lead_id: str):
             if tnorm:
                 link_abog = f"https://wa.me/{tnorm.replace('+','')}"
 
-        # WhatsApp al cliente (sesión / mensaje normal)
         mensaje_final = (
             f"✅ {nombre}, ya tengo tu *estimación preliminar*.\n\n"
             f"💰 *Total estimado:* ${total_estimado:,.2f}\n\n"
@@ -762,7 +756,6 @@ def process_lead(lead_id: str):
             mensaje_final += f"\n📄 Ver desglose en web: {link_reporte}\n"
         mensaje_final += "\n(Orientación informativa; no constituye asesoría legal.)"
 
-        # Guardar en Sheets (Web toma esto)
         update_row_cells(ws_leads, row, {
             "Analisis_AI": analisis_web,
             "Resultado_Calculo": desglose_txt,
@@ -790,11 +783,9 @@ def process_lead(lead_id: str):
             "Ultima_Actualizacion": now_iso(),
         }, hmap=h)
 
-        # Crear registro en Abogados_Admin (si existe)
         upsert_abogados_admin(sh, lead_id, abogado_id)
 
-        # ✅ Plantilla a la abogada (nuevo caso asignado) — SOLO ESTO en template
-        # Dedupe opcional: si existen columnas, no reenvía.
+        # ✅ TEMPLATE A ABOGADA (nuevo caso asignado) — con dedupe si existen columnas
         already_sent = ""
         if "Notif_Abogada_NuevoCaso" in h:
             try:
@@ -804,10 +795,17 @@ def process_lead(lead_id: str):
             except Exception:
                 already_sent = ""
 
+        if not abogado_tel:
+            _safe_update(ws_leads, row, {
+                "Notif_Abogada_NuevoCaso_Det": "NO_ENVIADO: abogado_tel vacío (revisar Cat_Abogados: Telefono_Aboga/Teléfono_Registro)",
+            }, hmap=h)
+
         if abogado_tel and not already_sent:
             tipo_h = "Despido" if str(tipo_caso).strip() == "1" else ("Renuncia" if str(tipo_caso).strip() == "2" else "Caso")
             total_txt = f"${total_estimado:,.2f} MXN"
-            detalle = f"Tipo: {tipo_h}\nTotal: {total_txt}\nReporte: {link_reporte or ''}"
+
+            # ✅ SIN saltos de línea dentro de variable (mejor para Twilio templates)
+            detalle = f"Tipo: {tipo_h} Total: {total_txt} Reporte: {link_reporte or ''}"
 
             okA, detA = send_whatsapp_template_safe(
                 to_number=abogado_tel,
@@ -819,13 +817,17 @@ def process_lead(lead_id: str):
                 }
             )
 
-            # marca de envío (solo si existen columnas)
-            _safe_update(ws_leads, row, {
-                "Notif_Abogada_NuevoCaso": now_iso(),
-                "Notif_Abogada_NuevoCaso_Det": (f"{okA} {detA}")[:240],
-            }, hmap=h)
+            if okA:
+                _safe_update(ws_leads, row, {
+                    "Notif_Abogada_NuevoCaso": now_iso(),
+                    "Notif_Abogada_NuevoCaso_Det": (f"{okA} {detA}")[:240],
+                }, hmap=h)
+            else:
+                _safe_update(ws_leads, row, {
+                    "Notif_Abogada_NuevoCaso_Det": (f"FALLO_ENVIO: {detA}")[:240],
+                }, hmap=h)
 
-        # Enviar WhatsApp al cliente
+        # WhatsApp al cliente (sesión)
         ok1, det1 = send_whatsapp_safe(telefono, mensaje_final)
 
         if ok1:
