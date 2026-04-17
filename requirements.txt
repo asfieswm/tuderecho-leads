@@ -3,7 +3,6 @@ gunicorn==22.0.0
 gspread==6.1.2
 google-auth==2.33.0
 twilio==9.2.3
-openai==1.40.0
 redis==5.0.8
 rq==1.16.2
 openai==1.55.3
