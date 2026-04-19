@@ -274,6 +274,32 @@ def whatsapp_webhook():
 
         msg_opt = normalize_option(msg_in_raw)
 
+        # ==========================================================
+        # INTERCEPCIÓN: LÓGICA DE RECUPERACIÓN (PROCESO A LA MITAD)
+        # ==========================================================
+        if estatus == "ESPERANDO_LLAMADA_OPCION":
+            if msg_opt == "1" or "si" in msg_lower or "sí" in msg_lower:
+                # SI, PREFIERO LLAMADA
+                upd = {
+                    "ESTATUS": "SOLICITAR_LLAMADA",
+                    "Analisis_AI": "CLIENTE SOLICITÓ LLAMADA DIRECTA. El proceso de chatbot quedó incompleto.",
+                    "Notas_Abogado": "PENDIENTE DE REGISTRO MANUAL - CONTACTAR URGENTE",
+                    "Aviso_Privacidad_Aceptado": "SOLICITADO_EN_LLAMADA",
+                    "Ultima_Actualizacion": now_iso()
+                }
+                update_row_cells(ws_leads, lead_row, upd, hmap=h)
+                return twiml("¡Perfecto! Un asesor de Cuantarchitec te llamará pronto para ayudarte. Gracias.")
+
+            else:
+                # NO GRACIAS o cualquier otra respuesta
+                update_row_cells(ws_leads, lead_row, {
+                    "ESTATUS": "CONTACTO_RECHAZADO",
+                    "Analisis_AI": "El usuario decidió no continuar con el registro ni recibir llamada.",
+                    "Ultima_Actualizacion": now_iso()
+                }, hmap=h)
+                return twiml("Entendido. Si en algún momento necesitas asesoría legal, aquí estaremos. ¡Buen día!")
+        # ==========================================================
+
         # Si está en INICIO y no manda 1/2 -> manda INICIO
         if estatus == "INICIO" and msg_opt not in ("1", "2"):
             out = get_text(cfg.get("INICIO", {})) or "Hola, soy Ximena.\n\n1️⃣ Sí\n2️⃣ No"
