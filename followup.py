@@ -61,4 +61,4 @@ def ejecutar_seguimiento():
                 print(f"Error procesando el teléfono {lead.get('Telefono')}: {e}")
 
 if __name__ == "__main__":
-    ejecutar_seguimiento()
+    ejecutar_seguimiento()    
