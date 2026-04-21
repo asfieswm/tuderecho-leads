@@ -590,15 +590,13 @@ def build_respuesta_empatica(
 ) -> str:
     """
     Se llama justo después de que el lead escribe su descripción libre (paso CASO_LIBRE).
-    Genera una respuesta corta (3-4 oraciones) que:
+    Genera una respuesta conversacional (4-6 oraciones) que:
       1. Muestra empatía real referenciando algo de lo que escribió.
       2. Valida que la situación tiene solución legal.
-      3. Termina preguntando por tipo de caso con la frase exacta para el parser del bot.
-
-    Usa las filas CONVERSACIONAL de Conocimiento_AI para personalizar.
-    Si OpenAI no está disponible usa el fallback de texto fijo.
+      3. Lanza UNA pregunta abierta o reflexiva que invite a interactuar.
+      4. Refuerza el valor de conectarse con una abogada (call to action suave).
+      5. Termina con la pregunta obligatoria de tipo de caso.
     """
-    # Seleccionar conocimiento de contexto conversacional
     temas_conv = select_conocimiento(
         con_rows, descripcion, tipo_caso_hint, k=2, contexto="CONVERSACIONAL"
     )
@@ -613,25 +611,39 @@ def build_respuesta_empatica(
     # ── Fallback sin OpenAI ──
     def fallback() -> str:
         if str(tipo_caso_hint).strip() == "1":
-            apertura = (
-                "Entiendo lo que describes y lamentamos que estés pasando por esto. "
-                "Un despido siempre genera incertidumbre, pero tienes derechos que podemos ayudarte a proteger."
+            cuerpo = (
+                "Gracias por contarnos lo que viviste. Un despido siempre genera mucha "
+                "incertidumbre, y es completamente válido que te sientas así.\n\n"
+                "Lo que describes puede tener solución legal, y muchas personas en tu "
+                "misma situación han podido recuperar lo que les corresponde.\n\n"
+                "¿Hay algo en particular que te preocupe más en este momento: "
+                "el dinero que te deben, los tiempos para reclamar, o cómo funciona el proceso?\n\n"
+                "Cuéntame, estoy aquí para orientarte. Y recuerda que conectarte con "
+                "una abogada especializada puede marcar una gran diferencia en el resultado.\n\n"
             )
         elif str(tipo_caso_hint).strip() == "2":
-            apertura = (
-                "Gracias por contarnos. Renunciar bajo presión o en condiciones difíciles "
-                "no significa perder todos tus derechos; aún puedes reclamar lo que te corresponde."
+            cuerpo = (
+                "Gracias por compartir tu situación. Renunciar, sobre todo bajo presión "
+                "o en condiciones difíciles, es una decisión muy difícil.\n\n"
+                "Lo que muchas personas no saben es que incluso renunciando conservas "
+                "derechos importantes que el patrón debe respetar.\n\n"
+                "¿Qué es lo que más te inquieta en este momento: si te van a pagar lo "
+                "que te corresponde, los tiempos, o algo más de la situación?\n\n"
+                "Cuéntame con confianza. Una abogada puede revisar tu caso y orientarte "
+                "sin costo para que tomes la mejor decisión.\n\n"
             )
         else:
-            apertura = (
-                "Gracias por compartirlo. Lo que describes puede tener solución legal "
-                "y estamos aquí para orientarte sin costo."
+            cuerpo = (
+                "Gracias por contarnos tu situación. Lo que describes es más común de "
+                "lo que crees, y tiene solución legal.\n\n"
+                "Muchas personas enfrentan exactamente esto y logran hacer valer sus "
+                "derechos con la orientación correcta.\n\n"
+                "¿Qué es lo que más te preocupa en este momento: el proceso, los "
+                "tiempos, o lo económico?\n\n"
+                "Cuéntame, y recuerda que conectarte con una abogada especializada "
+                "puede marcar la diferencia.\n\n"
             )
-        return (
-            f"{apertura}\n\n"
-            "Para darte la mejor orientación necesito una cosa más:\n\n"
-            "¿Fue un despido (1) o presentaste tu renuncia (2)?"
-        )
+        return cuerpo + "Para darte la orientación más precisa, dime:\n\n¿Fue un despido (1) o presentaste tu renuncia (2)?"
 
     if not (OPENAI_API_KEY and OpenAI):
         return fallback()
@@ -642,12 +654,24 @@ def build_respuesta_empatica(
         client = OpenAI(api_key=OPENAI_API_KEY)
 
         system_prompt = (
-            "Eres Ximena, asistente de Tu Derecho Laboral México. "
-            "Respondes únicamente por WhatsApp. "
-            "Reglas de formato: sin Markdown, sin asteriscos, sin listas, texto plano. "
-            "Longitud: máximo 4 oraciones en total, idealmente 3. "
-            "Tono: cálido, humano, empático pero profesional. Nunca robótico ni genérico. "
-            "La última línea de tu respuesta DEBE ser exactamente esta y nada más:\n"
+            "Eres Ximena, asistente legal de Tu Derecho Laboral México. "
+            "Atiendes por WhatsApp a personas que acaban de vivir un problema laboral. "
+            "Tu objetivo es que sientan que los escuchaste de verdad y que quieran seguir "
+            "hablando contigo.\n\n"
+            "REGLAS DE FORMATO:\n"
+            "- Sin Markdown, sin asteriscos, sin listas, texto plano.\n"
+            "- Máximo 6 oraciones en total, idealmente 5.\n"
+            "- Usa saltos de línea dobles entre párrafos para facilitar lectura en WhatsApp.\n\n"
+            "ESTRUCTURA OBLIGATORIA (en este orden):\n"
+            "1. Empatía real: menciona algo concreto de lo que escribieron (1-2 oraciones).\n"
+            "2. Validación: diles que tienen derechos y que hay solución (1 oración).\n"
+            "3. Pregunta abierta conversacional: UNA sola pregunta que invite a reflexionar "
+            "o aclarar algo de su situación (ej: qué les preocupa más, si ya intentaron "
+            "hablar con la empresa, si tienen documentos, etc.). Que suene natural, "
+            "no como formulario (1 oración).\n"
+            "4. Call to action suave: refuerza el valor de hablar con una abogada, "
+            "sin sonar vendedor (1 oración).\n"
+            "5. ÚLTIMA LÍNEA: debe ser exactamente esta y nada más:\n"
             "¿Fue un despido (1) o presentaste tu renuncia (2)?"
         )
 
@@ -657,12 +681,14 @@ def build_respuesta_empatica(
         )
         if contexto_txt:
             user_prompt += (
-                f"Contexto legal relevante (úsalo solo si aplica de forma natural, "
-                f"no lo cites textualmente):\n{contexto_txt}\n\n"
+                f"Contexto legal de apoyo (úsalo solo si aplica de forma natural, "
+                f"nunca lo cites textualmente):\n{contexto_txt}\n\n"
             )
         user_prompt += (
-            "Escribe una respuesta empática (2-3 oraciones) que demuestre que leíste "
-            "lo que vivió, valida que tiene derechos y termina con la pregunta de tipo de caso."
+            "Escribe la respuesta siguiendo exactamente la estructura del system prompt. "
+            "Que suene humana, cálida y que invite a seguir la conversación. "
+            "La pregunta abierta del paso 3 debe ser relevante para lo que describieron, "
+            "no genérica. Termina siempre con la pregunta de tipo de caso."
         )
 
         resp = client.chat.completions.create(
@@ -671,8 +697,8 @@ def build_respuesta_empatica(
                 {"role": "system", "content": system_prompt},
                 {"role": "user",   "content": user_prompt},
             ],
-            temperature=0.65,
-            max_tokens=220,
+            temperature=0.72,
+            max_tokens=320,
         )
 
         txt = (resp.choices[0].message.content or "").strip()
