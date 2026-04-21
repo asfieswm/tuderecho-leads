@@ -496,14 +496,23 @@ def load_conocimiento(ws_con) -> list[dict]:
         if activo not in ("SI", "SÍ", "1", "TRUE", "YES", "Y"):
             continue
 
+        # ✅ FIX: si no existe Contexto_Uso, usa Fuente como fallback
+        # (compatibilidad con hojas que usan Fuente = "CONVERSACIONAL")
+        contexto_uso = (d.get("Contexto_Uso") or "").strip().upper()
+        if not contexto_uso:
+            fuente = (d.get("Fuente") or "").strip().upper()
+            if fuente in ("CONVERSACIONAL", "ANALISIS", "AMBOS"):
+                contexto_uso = fuente
+            else:
+                contexto_uso = "AMBOS"
+
         out.append({
             "ID_Tema":         (d.get("ID_Tema")          or "").strip(),
             "Titulo_Visible":  (d.get("Titulo_Visible")   or "").strip(),
             "Contenido_Legal": (d.get("Contenido_Legal")  or "").strip(),
             "Palabras_Clave":  (d.get("Palabras_Clave")   or "").strip(),
             "Fuente":          (d.get("Fuente")            or "").strip(),
-            # Nuevas columnas — compatibles con hojas que aún no las tienen
-            "Contexto_Uso":    (d.get("Contexto_Uso")     or "AMBOS").strip().upper(),
+            "Contexto_Uso":    contexto_uso,
             "Prioridad":       safe_int(d.get("Prioridad") or "5"),
         })
     return out
