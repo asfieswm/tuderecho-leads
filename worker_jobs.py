@@ -888,25 +888,35 @@ def build_analisis_web_gpt(
 # Abogados Admin — upsert
 # ─────────────────────────────────────────────
 
-def upsert_abogados_admin(sh, lead_id: str, abogado_id: str) -> None:
+def upsert_abogados_admin(
+    sh,
+    lead_id: str,
+    abogado_id: str,
+    nombre_cliente: str = "",
+    telefono_normalizado: str = "",
+) -> None:
     try:
         ws = open_worksheet(sh, TAB_ABOG_ADMIN)
     except Exception:
         return
 
+    # ── Si ya existe la fila, solo actualiza estado ──
     try:
         existing = find_row_by_value(ws, "ID_Lead", lead_id)
         if existing:
             h = build_header_map(ws)
-            update_row_cells(
-                ws, existing,
-                {"ID_Abogado": abogado_id, "Estatus": "ASIGNADO"},
-                hmap=h,
-            )
+            upd = {"ID_Abogado": abogado_id, "Estatus": "ASIGNADO"}
+            # Rellena campos vacíos si los tenemos ahora
+            if nombre_cliente:
+                upd["Nombre"] = nombre_cliente
+            if telefono_normalizado:
+                upd["Telefono_Normalizado"] = telefono_normalizado
+            update_row_cells(ws, existing, upd, hmap=h)
             return
     except Exception:
         pass
 
+    # ── Nueva fila ──
     try:
         header  = with_backoff(ws.row_values, 1)
         h       = build_header_map(ws)
@@ -917,14 +927,16 @@ def upsert_abogados_admin(sh, lead_id: str, abogado_id: str) -> None:
             if c and 1 <= c <= len(row_out):
                 row_out[c - 1] = val
 
-        set_cell("ID_Admin",            uuid.uuid4().hex[:12])
-        set_cell("ID_Lead",             lead_id)
-        set_cell("ID_Abogado",          abogado_id)
-        set_cell("Estatus",             "ASIGNADO")
-        set_cell("Acepto_Asesoria",     "")
-        set_cell("Enviar_Cuestionario", "")
-        set_cell("Proxima_Fecha_Evento","")
-        set_cell("Notas",               "")
+        set_cell("ID_Admin",             uuid.uuid4().hex[:12])
+        set_cell("ID_Lead",              lead_id)
+        set_cell("ID_Abogado",           abogado_id)
+        set_cell("Nombre",               nombre_cliente)
+        set_cell("Telefono_Normalizado", telefono_normalizado)
+        set_cell("Estatus",              "ASIGNADO")
+        set_cell("Acepto_Asesoria",      "")
+        set_cell("Enviar_Cuestionario",  "")
+        set_cell("Proxima_Fecha_Evento", "")
+        set_cell("Notas",                "")
 
         with_backoff(ws.append_row, row_out, value_input_option="RAW")
     except Exception:
