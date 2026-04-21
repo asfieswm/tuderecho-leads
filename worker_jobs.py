@@ -17,29 +17,23 @@ from utils.sheets import (
 
 MX_TZ = ZoneInfo(os.environ.get("TZ", "America/Mexico_City").strip() or "America/Mexico_City")
 
-GOOGLE_SHEET_NAME = os.environ.get("GOOGLE_SHEET_NAME", "").strip()
+GOOGLE_SHEET_NAME        = os.environ.get("GOOGLE_SHEET_NAME", "").strip()
+TAB_LEADS                = os.environ.get("TAB_LEADS",           "BD_Leads").strip()
+TAB_ABOG                 = os.environ.get("TAB_ABOGADOS",        "Cat_Abogados").strip()
+TAB_SYS                  = os.environ.get("TAB_SYS",             "Config_Sistema").strip()
+TAB_ABOG_ADMIN           = os.environ.get("TAB_ABOGADOS_ADMIN",  "Abogados_Admin").strip()
+TAB_CONOCIMIENTO_AI      = os.environ.get("TAB_CONOCIMIENTO_AI", "Conocimiento_AI").strip()
 
-TAB_LEADS = os.environ.get("TAB_LEADS", "BD_Leads").strip()
-TAB_ABOG  = os.environ.get("TAB_ABOGADOS", "Cat_Abogados").strip()
-TAB_SYS   = os.environ.get("TAB_SYS", "Config_Sistema").strip()
-TAB_ABOG_ADMIN = os.environ.get("TAB_ABOGADOS_ADMIN", "Abogados_Admin").strip()
-TAB_CONOCIMIENTO_AI = os.environ.get("TAB_CONOCIMIENTO_AI", "Conocimiento_AI").strip()
+TWILIO_ACCOUNT_SID       = os.environ.get("TWILIO_ACCOUNT_SID",       "").strip()
+TWILIO_AUTH_TOKEN        = os.environ.get("TWILIO_AUTH_TOKEN",        "").strip()
+TWILIO_WHATSAPP_NUMBER   = os.environ.get("TWILIO_WHATSAPP_NUMBER",   "").strip()
 
-TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "").strip()
-TWILIO_AUTH_TOKEN  = os.environ.get("TWILIO_AUTH_TOKEN", "").strip()
-TWILIO_WHATSAPP_NUMBER = os.environ.get("TWILIO_WHATSAPP_NUMBER", "").strip()
-
-# ✅ Plantilla aprobada: Nuevo caso asignado (abogada) (3 variables)
-# Body:
-# Cliente: {{1}}
-# Teléfono: {{2}}
-# Detalle del caso: {{3}}
-# Favor de dar seguimiento.
+# Plantilla aprobada: Nuevo caso asignado (abogada) — 3 variables:
+# {{1}} Cliente  {{2}} Teléfono  {{3}} Detalle del caso
 WA_TPL_ABOGADA_NUEVO_CASO_SID = os.environ.get("WA_TPL_ABOGADA_NUEVO_CASO_SID", "").strip()
 
-# OpenAI (opcional)
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip()
+OPENAI_API_KEY  = os.environ.get("OPENAI_API_KEY",  "").strip()
+OPENAI_MODEL    = os.environ.get("OPENAI_MODEL",    "gpt-4o-mini").strip()
 
 try:
     from openai import OpenAI
@@ -47,11 +41,13 @@ except Exception:
     OpenAI = None
 
 
-# --------------------
-# Helpers
-# --------------------
-def now_iso():
+# ─────────────────────────────────────────────
+# Helpers generales
+# ─────────────────────────────────────────────
+
+def now_iso() -> str:
     return datetime.now(MX_TZ).strftime("%Y-%m-%dT%H:%M:%S%z")
+
 
 def _wa_addr(raw: str) -> str:
     t = (raw or "").strip()
@@ -59,20 +55,22 @@ def _wa_addr(raw: str) -> str:
         return ""
     return t if t.startswith("whatsapp:") else "whatsapp:" + t
 
+
 def _get_twilio_client() -> Client:
     if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN):
         raise RuntimeError("Faltan credenciales de Twilio (TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN).")
     return Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
+
 def _to_e164(raw: str) -> str:
     """
-    Normaliza teléfono para WhatsApp (E.164).
-    Acepta +52..., 521..., 55..., etc.
+    Normaliza teléfono a E.164.
+    Acepta: +52..., 521..., 55..., whatsapp:+52...
     """
     s = (raw or "").strip()
     if not s:
         return ""
-    s = "".join([c for c in s if c.isdigit() or c == "+"])
+    s = "".join(c for c in s if c.isdigit() or c == "+")
     if not s:
         return ""
     if s.startswith("whatsapp:"):
@@ -84,67 +82,68 @@ def _to_e164(raw: str) -> str:
         s = "+" + s
     return s
 
-def send_whatsapp_safe(to_number: str, body: str):
-    """Envía WhatsApp (sesión) y NO truena el job: regresa (ok, detail)."""
+
+def send_whatsapp_safe(to_number: str, body: str) -> tuple[bool, str]:
+    """Envía un mensaje WhatsApp de sesión. No lanza excepción; retorna (ok, detalle)."""
     try:
         if not TWILIO_WHATSAPP_NUMBER:
-            return (False, "Falta TWILIO_WHATSAPP_NUMBER.")
+            return False, "Falta TWILIO_WHATSAPP_NUMBER."
         client = _get_twilio_client()
         to_e164 = to_number if str(to_number).startswith("whatsapp:") else _to_e164(to_number)
         msg = client.messages.create(
             from_=_wa_addr(TWILIO_WHATSAPP_NUMBER),
             to=_wa_addr(to_e164),
-            body=body
+            body=body,
         )
-        return (True, f"SID={getattr(msg, 'sid', '')}")
+        return True, f"SID={getattr(msg, 'sid', '')}"
     except TwilioRestException as e:
-        code = getattr(e, "code", "")
-        return (False, f"TwilioRestException {code}: {str(e)}")
+        return False, f"TwilioRestException {getattr(e, 'code', '')}: {e}"
     except Exception as e:
-        return (False, f"{type(e).__name__}: {e}")
+        return False, f"{type(e).__name__}: {e}"
+
 
 def _clean_var(v) -> str:
-    # asegura string, sin None, sin chars de control
+    """Limpia una variable para usar en plantillas Twilio (sin saltos de línea ni chars de control)."""
     s = "" if v is None else str(v)
     s = s.replace("\r", " ").replace("\n", " ").strip()
-    s = re.sub(r"[\x00-\x1F\x7F]", " ", s)  # control chars
+    s = re.sub(r"[\x00-\x1F\x7F]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
-def send_whatsapp_template_safe(to_number: str, template_sid: str, variables: dict):
-    """
-    Envía WhatsApp usando plantilla (Twilio Content API).
-    variables: {"1":"...", "2":"...", "3":"..."}
-    """
+
+def send_whatsapp_template_safe(
+    to_number: str,
+    template_sid: str,
+    variables: dict,
+) -> tuple[bool, str]:
+    """Envía WhatsApp usando plantilla de Twilio Content API. Retorna (ok, detalle)."""
     try:
         if not TWILIO_WHATSAPP_NUMBER:
-            return (False, "Falta TWILIO_WHATSAPP_NUMBER.")
+            return False, "Falta TWILIO_WHATSAPP_NUMBER."
         if not template_sid:
-            return (False, "Falta template SID (content_sid).")
-
+            return False, "Falta template SID (content_sid)."
         to_e164 = _to_e164(to_number)
         if not to_e164:
-            return (False, "Número destino inválido.")
-
-        payload = {}
-        for k, v in (variables or {}).items():
-            payload[str(k)] = _clean_var(v)
-
+            return False, "Número destino inválido."
+        payload = {str(k): _clean_var(v) for k, v in (variables or {}).items()}
         content_vars = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-
         client = _get_twilio_client()
         msg = client.messages.create(
             from_=_wa_addr(TWILIO_WHATSAPP_NUMBER),
             to=_wa_addr(to_e164),
             content_sid=template_sid,
-            content_variables=content_vars
+            content_variables=content_vars,
         )
-        return (True, f"SID={getattr(msg, 'sid', '')}")
+        return True, f"SID={getattr(msg, 'sid', '')}"
     except TwilioRestException as e:
-        code = getattr(e, "code", "")
-        return (False, f"TwilioRestException {code}: {str(e)}")
+        return False, f"TwilioRestException {getattr(e, 'code', '')}: {e}"
     except Exception as e:
-        return (False, f"{type(e).__name__}: {e}")
+        return False, f"{type(e).__name__}: {e}"
+
+
+# ─────────────────────────────────────────────
+# Conversión de tipos
+# ─────────────────────────────────────────────
 
 def money_to_float(s: str) -> float:
     try:
@@ -152,11 +151,13 @@ def money_to_float(s: str) -> float:
     except Exception:
         return 0.0
 
+
 def safe_int(s: str) -> int:
     try:
         return int(str(s).strip())
     except Exception:
         return 0
+
 
 def safe_float(s: str) -> float:
     try:
@@ -164,15 +165,22 @@ def safe_float(s: str) -> float:
     except Exception:
         return 0.0
 
+
+# ─────────────────────────────────────────────
+# Texto
+# ─────────────────────────────────────────────
+
 def _normalize_text(s: str) -> str:
     s = (s or "").lower()
     s = re.sub(r"[^a-záéíóúüñ0-9\s]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
+
 def _clip_chars(s: str, max_chars: int) -> str:
     s = (s or "").strip()
     return s if len(s) <= max_chars else s[:max_chars].rstrip() + "…"
+
 
 def _clip_words(text: str, max_words: int) -> str:
     words = (text or "").strip().split()
@@ -180,13 +188,19 @@ def _clip_words(text: str, max_words: int) -> str:
         return (text or "").strip()
     return " ".join(words[:max_words]).rstrip() + "…"
 
-def _safe_update(ws, row_num: int, payload: dict, hmap: dict):
-    """Actualiza solo columnas existentes."""
+
+# ─────────────────────────────────────────────
+# Google Sheets — helpers
+# ─────────────────────────────────────────────
+
+def _safe_update(ws, row_num: int, payload: dict, hmap: dict) -> None:
+    """Actualiza solo las columnas que existen en la hoja."""
     if not payload:
         return
     clean = {k: v for k, v in payload.items() if k in hmap}
     if clean:
         update_row_cells(ws, row_num, clean, hmap=hmap)
+
 
 def read_sys_config(ws_sys) -> dict:
     values = get_all_values_safe(ws_sys)
@@ -202,39 +216,36 @@ def read_sys_config(ws_sys) -> dict:
             out[k] = v
     return out
 
-def set_sys_value(ws_sys, key: str, value: str):
-    """Escribe/actualiza en Config_Sistema (Clave/Valor)."""
+
+def set_sys_value(ws_sys, key: str, value: str) -> None:
+    """Escribe o actualiza una clave en Config_Sistema (columnas Clave / Valor)."""
     key = (key or "").strip()
     if not key:
         return
-
     values = get_all_values_safe(ws_sys)
     if not values:
         with_backoff(ws_sys.append_row, ["Clave", "Valor"], value_input_option="RAW")
         values = get_all_values_safe(ws_sys)
-
     hdr = values[0]
     if "Clave" not in hdr or "Valor" not in hdr:
         return
-
     for i in range(1, len(values)):
-        row = values[i]
-        d = row_to_dict(hdr, row)
+        d = row_to_dict(hdr, values[i])
         if (d.get("Clave") or "").strip() == key:
             hmap = build_header_map(ws_sys)
-            row_num = i + 1
-            update_row_cells(ws_sys, row_num, {"Valor": str(value)}, hmap=hmap)
+            update_row_cells(ws_sys, i + 1, {"Valor": str(value)}, hmap=hmap)
             return
-
     with_backoff(ws_sys.append_row, [key, str(value)], value_input_option="RAW")
 
-def list_active_abogados(ws_abog):
+
+# ─────────────────────────────────────────────
+# Abogados
+# ─────────────────────────────────────────────
+
+def list_active_abogados(ws_abog) -> list[tuple[str, str, str]]:
     """
-    ✅ Compatible con tu hoja:
-      - ID: "Abogado"
-      - Nombre: "Nombre_Abogado"
-      - Tel: "Telefono_Aboga" o "Teléfono_Registro"
-      - Activo: "Activo"
+    Retorna lista de (ID, Nombre, Telefono) de abogados activos.
+    Compatible con encabezados: Abogado | Nombre_Abogado | Telefono_Aboga | Activo
     """
     h = build_header_map(ws_abog)
     rows = with_backoff(ws_abog.get_all_values)
@@ -245,53 +256,59 @@ def list_active_abogados(ws_abog):
         for name in names:
             if name in h:
                 c = col_idx(h, name)
-                val = (r[c-1] if c and c-1 < len(r) else "").strip()
+                val = (r[c - 1] if c and c - 1 < len(r) else "").strip()
                 if val:
                     return val
         return ""
 
     def is_active(r):
-        v = get_any(r, ["Activo"]).upper()
-        return v in ("SI", "SÍ", "TRUE", "1", "YES", "Y")
+        return get_any(r, ["Activo"]).upper() in ("SI", "SÍ", "TRUE", "1", "YES", "Y")
 
     out = []
     for r in rows[1:]:
         aid = get_any(r, ["ID_Abogado", "Abogado", "ID"])
         if not aid or not is_active(r):
             continue
-
-        nombre = get_any(r, ["Nombre_Abogado", "Nombre_Abogada", "Nombre_Abogad", "Nombre"]) or f"Abogada {aid}"
-        tel = get_any(r, ["Telefono_Aboga", "Telefono_Abogado", "Teléfono_Registro", "Telefono_Registro", "Telefono"])
-
+        nombre = (
+            get_any(r, ["Nombre_Abogado", "Nombre_Abogada", "Nombre_Abogad", "Nombre"])
+            or f"Abogada {aid}"
+        )
+        tel = get_any(r, [
+            "Telefono_Aboga", "Telefono_Abogado",
+            "Teléfono_Registro", "Telefono_Registro", "Telefono",
+        ])
         out.append((aid, nombre, tel))
 
     out.sort(key=lambda x: x[0])
     return out
 
-def pick_abogado_secuencial(ws_abog, ws_sys, salario_mensual: float, syscfg: dict):
-    """VIP A01 si salario>=50k; si no, round-robin con ABOGADO_ULTIMO_ID."""
+
+def pick_abogado_secuencial(
+    ws_abog, ws_sys, salario_mensual: float, syscfg: dict
+) -> tuple[str, str, str]:
+    """
+    Asignación round-robin. VIP: A01 si salario >= 50 000.
+    Persiste el último ID asignado en Config_Sistema (clave ABOGADO_ULTIMO_ID).
+    """
     activos = list_active_abogados(ws_abog)
     if not activos:
-        return ("A01", "Abogada asignada", "")
+        return "A01", "Abogada asignada", ""
 
-    def by_id(aid: str):
+    def by_id(aid):
         for x in activos:
             if x[0] == aid:
                 return x
         return None
 
-    if salario_mensual >= 50000:
+    if salario_mensual >= 50_000:
         a01 = by_id("A01")
-        if a01:
-            return a01
-        return activos[0]
+        return a01 if a01 else activos[0]
 
     last_id = (syscfg.get("ABOGADO_ULTIMO_ID") or "").strip()
     ids = [a[0] for a in activos]
 
     if last_id in ids:
-        idx = ids.index(last_id)
-        nxt = activos[(idx + 1) % len(activos)]
+        nxt = activos[(ids.index(last_id) + 1) % len(activos)]
     else:
         nxt = activos[0]
 
@@ -302,37 +319,26 @@ def pick_abogado_secuencial(ws_abog, ws_sys, salario_mensual: float, syscfg: dic
 
     return nxt
 
+
+# ─────────────────────────────────────────────
+# Cálculo de indemnización
+# ─────────────────────────────────────────────
+
 def years_of_service(ini: date, fin: date) -> float:
     days = max((fin - ini).days, 0)
     return days / 365.0 if days else 0.0
 
+
 def vacation_days_by_years(y: int) -> int:
-    if y <= 0:
-        return 0
-    if y == 1: return 12
-    if y == 2: return 14
-    if y == 3: return 16
-    if y == 4: return 18
-    if y == 5: return 20
+    if y <= 0:  return 0
+    if y == 1:  return 12
+    if y == 2:  return 14
+    if y == 3:  return 16
+    if y == 4:  return 18
+    if y == 5:  return 20
     extra_blocks = (y - 6) // 5 + 1
     return 20 + 2 * extra_blocks
 
-def _parse_date_parts(h, vals, prefix: str) -> date:
-    def get(name):
-        c = col_idx(h, name)
-        return (vals[c-1] if c and c-1 < len(vals) else "").strip()
-
-    y = safe_int(get(f"{prefix}_Anio"))
-    m = safe_int(get(f"{prefix}_Mes"))
-    d = safe_int(get(f"{prefix}_Dia"))
-
-    if y < 1900 or y > 2100:
-        raise ValueError(f"{prefix}: año inválido ({y})")
-    if m < 1 or m > 12:
-        raise ValueError(f"{prefix}: mes inválido ({m})")
-    if d < 1 or d > 31:
-        raise ValueError(f"{prefix}: día inválido ({d})")
-    return date(y, m, d)
 
 def _last_anniversary(ini: date, fin: date) -> date:
     try:
@@ -346,22 +352,36 @@ def _last_anniversary(ini: date, fin: date) -> date:
             ann = date(fin.year - 1, ini.month, min(ini.day, 28))
     return max(ann, ini)
 
-def calc_estimacion_detallada(tipo_caso: str, salario_mensual: float, ini: date, fin: date, salario_min_diario: float = 0.0):
-    sd = salario_mensual / 30.0 if salario_mensual else 0.0
-    y = years_of_service(ini, fin)
+
+def calc_estimacion_detallada(
+    tipo_caso: str,
+    salario_mensual: float,
+    ini: date,
+    fin: date,
+    salario_min_diario: float = 0.0,
+) -> tuple[str, float, dict]:
+    """
+    Retorna (texto_desglose, total_estimado, componentes_dict).
+    tipo_caso: "1" = despido injustificado, "2" = renuncia.
+    """
+    sd  = salario_mensual / 30.0 if salario_mensual else 0.0
+    y   = years_of_service(ini, fin)
     y_int = int(y) if y > 0 else 0
 
-    start_year = date(fin.year, 1, 1)
-    days_agu = max((fin - start_year).days + 1, 0)
-    aguinaldo_prop = sd * 15 * (days_agu / 365.0) if sd else 0.0
+    # Aguinaldo proporcional
+    start_year      = date(fin.year, 1, 1)
+    days_agu        = max((fin - start_year).days + 1, 0)
+    aguinaldo_prop  = sd * 15 * (days_agu / 365.0) if sd else 0.0
 
-    vac_from = _last_anniversary(ini, fin)
-    days_vac_period = max((fin - vac_from).days + 1, 0)
-    vac_days_base = vacation_days_by_years(max(y_int, 1) if y > 0 else 0)
-    vacaciones_prop = sd * vac_days_base * (days_vac_period / 365.0) if sd else 0.0
-    prima_vac_prop = vacaciones_prop * 0.25
+    # Vacaciones proporcionales
+    vac_from         = _last_anniversary(ini, fin)
+    days_vac_period  = max((fin - vac_from).days + 1, 0)
+    vac_days_base    = vacation_days_by_years(max(y_int, 1) if y > 0 else 0)
+    vacaciones_prop  = sd * vac_days_base * (days_vac_period / 365.0) if sd else 0.0
+    prima_vac_prop   = vacaciones_prop * 0.25
 
-    sd_top = sd
+    # Prima de antigüedad (topada a 2 salarios mínimos diarios cuando aplica)
+    sd_top    = sd
     if salario_min_diario and salario_min_diario > 0:
         sd_top = min(sd, 2.0 * salario_min_diario)
     prima_ant = sd_top * 12.0 * y if (sd_top and y > 0) else 0.0
@@ -370,8 +390,9 @@ def calc_estimacion_detallada(tipo_caso: str, salario_mensual: float, ini: date,
     ind_20 = 0.0
 
     if str(tipo_caso).strip() == "1":
+        # ── Despido injustificado ──
         ind_90 = sd * 90.0
-        total = ind_90 + prima_ant + aguinaldo_prop + vacaciones_prop + prima_vac_prop
+        total  = ind_90 + prima_ant + aguinaldo_prop + vacaciones_prop + prima_vac_prop
 
         desglose = (
             "DESGLOSE DETALLADO (REFERENCIAL)\n"
@@ -386,14 +407,13 @@ def calc_estimacion_detallada(tipo_caso: str, salario_mensual: float, ini: date,
             f"- Vacaciones proporcionales (desde {vac_from.isoformat()} / {vac_days_base} días/año): ${vacaciones_prop:,.2f}\n"
             f"- Prima vacacional proporcional (25%): ${prima_vac_prop:,.2f}\n\n"
             f"TOTAL ESTIMADO: ${total:,.2f}\n\n"
-            "Nota: el monto puede variar por salario integrado real, prestaciones adicionales, salarios caídos, topes vigentes y documentación."
+            "Nota: el monto puede variar por salario integrado real, prestaciones adicionales, "
+            "salarios caídos, topes vigentes y documentación."
         )
     else:
-        total = aguinaldo_prop + vacaciones_prop + prima_vac_prop
-        prima_ant_ren = 0.0
-        if y >= 15:
-            prima_ant_ren = prima_ant
-            total += prima_ant_ren
+        # ── Renuncia ──
+        prima_ant_ren = prima_ant if y >= 15 else 0.0
+        total = aguinaldo_prop + vacaciones_prop + prima_vac_prop + prima_ant_ren
 
         desglose = (
             "DESGLOSE DETALLADO (REFERENCIAL)\n"
@@ -404,7 +424,7 @@ def calc_estimacion_detallada(tipo_caso: str, salario_mensual: float, ini: date,
             f"- Aguinaldo proporcional (desde {start_year.isoformat()}): ${aguinaldo_prop:,.2f}\n"
             f"- Vacaciones proporcionales (desde {vac_from.isoformat()} / {vac_days_base} días/año): ${vacaciones_prop:,.2f}\n"
             f"- Prima vacacional proporcional (25%): ${prima_vac_prop:,.2f}\n"
-            + (f"- Prima de antigüedad (si ≥15 años): ${prima_ant_ren:,.2f}\n" if prima_ant_ren else "")
+            + (f"- Prima de antigüedad (≥15 años): ${prima_ant_ren:,.2f}\n" if prima_ant_ren else "")
             + f"\nTOTAL ESTIMADO: ${total:,.2f}\n\n"
             "Nota: el monto puede variar según recibos, prestaciones reales y pagos pendientes."
         )
@@ -413,19 +433,56 @@ def calc_estimacion_detallada(tipo_caso: str, salario_mensual: float, ini: date,
         "Indemnizacion_90": ind_90,
         "Indemnizacion_20": ind_20,
         "Prima_Antiguedad": prima_ant,
-        "Aguinaldo_Prop": aguinaldo_prop,
-        "Vacaciones_Prop": vacaciones_prop,
-        "Prima_Vac_Prop": prima_vac_prop,
-        "Vac_Dias_Base": vac_days_base,
+        "Aguinaldo_Prop":   aguinaldo_prop,
+        "Vacaciones_Prop":  vacaciones_prop,
+        "Prima_Vac_Prop":   prima_vac_prop,
+        "Vac_Dias_Base":    vac_days_base,
     }
     return desglose, total, componentes
 
-def build_resumen_whatsapp(tipo_caso: str, nombre: str) -> str:
-    if str(tipo_caso).strip() == "1":
-        return f"{nombre}, lamento lo ocurrido. Este total es una referencia preliminar; lo afinamos con documentos."
-    return f"{nombre}, gracias por contarnos tu caso. Este total es una referencia preliminar; lo afinamos con documentos."
 
-def load_conocimiento(ws_con):
+# ─────────────────────────────────────────────
+# Fechas — parseo seguro con día por defecto = 1
+# ─────────────────────────────────────────────
+
+def _parse_date_parts_safe(h: dict, vals: list, prefix: str) -> date:
+    """
+    Lee Año y Mes de la hoja. El Día es opcional: si está vacío o ausente usa 1.
+    Garantiza que el día sea válido para cualquier mes (máximo 28 en modo seguro).
+    No lanza excepción por día inválido; solo por año o mes fuera de rango.
+    """
+    def get(name: str) -> str:
+        c = col_idx(h, name)
+        return (vals[c - 1] if c and c - 1 < len(vals) else "").strip()
+
+    y = safe_int(get(f"{prefix}_Anio"))
+    m = safe_int(get(f"{prefix}_Mes"))
+
+    d_raw = get(f"{prefix}_Dia")
+    d = safe_int(d_raw) if d_raw else 1
+
+    if y < 1900 or y > 2100:
+        raise ValueError(f"{prefix}: año inválido ({y}). Escribe un año como 2020 o 2024.")
+    if m < 1 or m > 12:
+        raise ValueError(f"{prefix}: mes inválido ({m}). Escribe un número del 1 al 12.")
+
+    # Clamp al día seguro para todos los meses (evita date(año, 2, 29) en años no bisiestos)
+    d = max(1, min(d, 28))
+    return date(y, m, d)
+
+
+# ─────────────────────────────────────────────
+# Conocimiento_AI — carga y selección
+# ─────────────────────────────────────────────
+
+def load_conocimiento(ws_con) -> list[dict]:
+    """
+    Carga todas las filas activas de la hoja Conocimiento_AI.
+    Columnas esperadas: ID_Tema, Titulo_Visible, Contenido_Legal,
+                        Palabras_Clave, Fuente, Contexto_Uso, Prioridad, Activo
+    Las columnas nuevas (Contexto_Uso, Prioridad, Activo) son opcionales:
+    si no existen en la hoja se usan valores por defecto.
+    """
     values = get_all_values_safe(ws_con)
     if not values or len(values) < 2:
         return []
@@ -433,36 +490,79 @@ def load_conocimiento(ws_con):
     out = []
     for r in values[1:]:
         d = row_to_dict(hdr, r)
+
+        # Columna Activo: si no existe en la hoja asumimos que está activo
+        activo = (d.get("Activo") or "SI").strip().upper()
+        if activo not in ("SI", "SÍ", "1", "TRUE", "YES", "Y"):
+            continue
+
         out.append({
-            "ID_Tema": (d.get("ID_Tema") or "").strip(),
-            "Titulo_Visible": (d.get("Titulo_Visible") or "").strip(),
-            "Contenido_Legal": (d.get("Contenido_Legal") or "").strip(),
-            "Palabras_Clave": (d.get("Palabras_Clave") or "").strip(),
-            "Fuente": (d.get("Fuente") or "").strip(),
+            "ID_Tema":         (d.get("ID_Tema")          or "").strip(),
+            "Titulo_Visible":  (d.get("Titulo_Visible")   or "").strip(),
+            "Contenido_Legal": (d.get("Contenido_Legal")  or "").strip(),
+            "Palabras_Clave":  (d.get("Palabras_Clave")   or "").strip(),
+            "Fuente":          (d.get("Fuente")            or "").strip(),
+            # Nuevas columnas — compatibles con hojas que aún no las tienen
+            "Contexto_Uso":    (d.get("Contexto_Uso")     or "AMBOS").strip().upper(),
+            "Prioridad":       safe_int(d.get("Prioridad") or "5"),
         })
     return out
 
-def select_conocimiento(con_rows, descripcion: str, tipo_caso: str, k=3):
-    desc_n = _normalize_text(descripcion)
-    tokens = set([t for t in desc_n.split() if len(t) >= 4])
 
+def select_conocimiento(
+    con_rows: list[dict],
+    descripcion: str,
+    tipo_caso: str,
+    k: int = 3,
+    contexto: str = "ANALISIS",
+) -> list[dict]:
+    """
+    Filtra y rankea filas de Conocimiento_AI por relevancia.
+
+    contexto:
+      "CONVERSACIONAL" → solo filas con Contexto_Uso = CONVERSACIONAL o AMBOS
+      "ANALISIS"       → solo filas con Contexto_Uso = ANALISIS o AMBOS
+      "AMBOS"          → todas las filas activas
+
+    El score combina:
+      +2 por cada keyword que aparezca en la descripción normalizada
+      +1 por cada token de la descripción que aparezca en el título
+      -Prioridad / 10 (menor prioridad = mejor posición en empate)
+    """
+    desc_n = _normalize_text(descripcion)
+    tokens = {t for t in desc_n.split() if len(t) >= 4}
+
+    # Palabras clave extra según tipo de caso
     if str(tipo_caso).strip() == "1":
-        tokens |= {"despido", "indemnizacion", "indemnización", "finiquito", "rescision", "rescisión"}
+        tokens |= {"despido", "indemnizacion", "indemnización",
+                   "finiquito", "rescision", "rescisión"}
     elif str(tipo_caso).strip() == "2":
-        tokens |= {"renuncia", "finiquito", "prestaciones", "vacaciones", "aguinaldo"}
+        tokens |= {"renuncia", "finiquito", "prestaciones",
+                   "vacaciones", "aguinaldo"}
 
     scored = []
     for row in con_rows:
+        # Filtro por contexto de uso
+        row_ctx = row.get("Contexto_Uso", "AMBOS")
+        if contexto != "AMBOS" and row_ctx not in (contexto, "AMBOS"):
+            continue
+
         keys = _normalize_text(row.get("Palabras_Clave", ""))
         key_list = [x.strip() for x in re.split(r"[;,]", keys) if x.strip()]
-        score = 0
+
+        score = 0.0
         for kw in key_list:
             if kw and (kw in desc_n or kw in tokens):
                 score += 2
+
         title = _normalize_text(row.get("Titulo_Visible", ""))
         for t in tokens:
             if t in title:
                 score += 1
+
+        # Prioridad como desempate (filas con Prioridad=1 suben ligeramente)
+        score -= row.get("Prioridad", 5) / 10.0
+
         if score > 0:
             scored.append((score, row))
 
@@ -470,9 +570,133 @@ def select_conocimiento(con_rows, descripcion: str, tipo_caso: str, k=3):
     return [r for _, r in scored[:k]]
 
 
-# --------------------
-# ✅ ANÁLISIS WEB (más personalizado ~250 palabras)
-# --------------------
+# ─────────────────────────────────────────────
+# AI — Respuesta empática inmediata (nuevo)
+# ─────────────────────────────────────────────
+
+def build_respuesta_empatica(
+    descripcion: str,
+    con_rows: list[dict],
+    tipo_caso_hint: str = "",
+) -> str:
+    """
+    Se llama justo después de que el lead escribe su descripción libre (paso CASO_LIBRE).
+    Genera una respuesta corta (3-4 oraciones) que:
+      1. Muestra empatía real referenciando algo de lo que escribió.
+      2. Valida que la situación tiene solución legal.
+      3. Termina preguntando por tipo de caso con la frase exacta para el parser del bot.
+
+    Usa las filas CONVERSACIONAL de Conocimiento_AI para personalizar.
+    Si OpenAI no está disponible usa el fallback de texto fijo.
+    """
+    # Seleccionar conocimiento de contexto conversacional
+    temas_conv = select_conocimiento(
+        con_rows, descripcion, tipo_caso_hint, k=2, contexto="CONVERSACIONAL"
+    )
+
+    contexto_txt = ""
+    for t in temas_conv:
+        contenido = _clip_chars((t.get("Contenido_Legal") or "").strip(), 300)
+        if contenido:
+            contexto_txt += f"- {contenido}\n"
+    contexto_txt = contexto_txt.strip()
+
+    # ── Fallback sin OpenAI ──
+    def fallback() -> str:
+        if str(tipo_caso_hint).strip() == "1":
+            apertura = (
+                "Entiendo lo que describes y lamentamos que estés pasando por esto. "
+                "Un despido siempre genera incertidumbre, pero tienes derechos que podemos ayudarte a proteger."
+            )
+        elif str(tipo_caso_hint).strip() == "2":
+            apertura = (
+                "Gracias por contarnos. Renunciar bajo presión o en condiciones difíciles "
+                "no significa perder todos tus derechos; aún puedes reclamar lo que te corresponde."
+            )
+        else:
+            apertura = (
+                "Gracias por compartirlo. Lo que describes puede tener solución legal "
+                "y estamos aquí para orientarte sin costo."
+            )
+        return (
+            f"{apertura}\n\n"
+            "Para darte la mejor orientación necesito una cosa más:\n\n"
+            "¿Fue un despido (1) o presentaste tu renuncia (2)?"
+        )
+
+    if not (OPENAI_API_KEY and OpenAI):
+        return fallback()
+
+    desc_recortada = _clip_chars(descripcion, 600)
+
+    try:
+        client = OpenAI(api_key=OPENAI_API_KEY)
+
+        system_prompt = (
+            "Eres Ximena, asistente de Tu Derecho Laboral México. "
+            "Respondes únicamente por WhatsApp. "
+            "Reglas de formato: sin Markdown, sin asteriscos, sin listas, texto plano. "
+            "Longitud: máximo 4 oraciones en total, idealmente 3. "
+            "Tono: cálido, humano, empático pero profesional. Nunca robótico ni genérico. "
+            "La última línea de tu respuesta DEBE ser exactamente esta y nada más:\n"
+            "¿Fue un despido (1) o presentaste tu renuncia (2)?"
+        )
+
+        user_prompt = (
+            f"El lead escribió esto sobre su situación laboral:\n\n"
+            f"\"{desc_recortada}\"\n\n"
+        )
+        if contexto_txt:
+            user_prompt += (
+                f"Contexto legal relevante (úsalo solo si aplica de forma natural, "
+                f"no lo cites textualmente):\n{contexto_txt}\n\n"
+            )
+        user_prompt += (
+            "Escribe una respuesta empática (2-3 oraciones) que demuestre que leíste "
+            "lo que vivió, valida que tiene derechos y termina con la pregunta de tipo de caso."
+        )
+
+        resp = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": user_prompt},
+            ],
+            temperature=0.65,
+            max_tokens=220,
+        )
+
+        txt = (resp.choices[0].message.content or "").strip()
+        if not txt:
+            return fallback()
+
+        # Garantizar que la pregunta de cierre siempre esté presente
+        pregunta_cierre = "¿Fue un despido (1) o presentaste tu renuncia (2)?"
+        if pregunta_cierre not in txt:
+            txt = txt.rstrip() + "\n\n" + pregunta_cierre
+
+        return txt
+
+    except Exception:
+        return fallback()
+
+
+# ─────────────────────────────────────────────
+# AI — Análisis web final (~250 palabras)
+# ─────────────────────────────────────────────
+
+def build_resumen_whatsapp(tipo_caso: str, nombre: str) -> str:
+    if str(tipo_caso).strip() == "1":
+        return (
+            f"{nombre}, lamento lo ocurrido. "
+            "Este total es una referencia preliminar; lo afinamos con documentos."
+        )
+    return (
+        f"{nombre}, gracias por contarnos tu caso. "
+        "Este total es una referencia preliminar; lo afinamos con documentos."
+    )
+
+
 def build_analisis_web_gpt(
     nombre: str,
     tipo_caso: str,
@@ -480,51 +704,63 @@ def build_analisis_web_gpt(
     salario_mensual: float,
     ini: date,
     fin: date,
-    temas: list,
+    temas: list[dict],
     total_estimado: float = 0.0,
     componentes: dict | None = None,
-    abogado_nombre: str = ""
-):
-    tipo_h = "Despido" if str(tipo_caso).strip() == "1" else ("Renuncia" if str(tipo_caso).strip() == "2" else "Caso laboral")
-    desc = (descripcion or "").strip()
-    antig = years_of_service(ini, fin)
+    abogado_nombre: str = "",
+) -> str:
+    """
+    Genera el análisis consultivo completo (~250 palabras) para mostrar
+    en el reporte web o enviar por WhatsApp al finalizar el flujo.
+    """
+    tipo_h   = "Despido" if str(tipo_caso).strip() == "1" else (
+               "Renuncia" if str(tipo_caso).strip() == "2" else "Caso laboral")
+    desc     = (descripcion or "").strip()
+    antig    = years_of_service(ini, fin)
     antig_txt = f"{antig:.2f} años" if antig > 0 else "—"
-    sd = (salario_mensual / 30.0) if salario_mensual else 0.0
+    sd       = (salario_mensual / 30.0) if salario_mensual else 0.0
 
     comp = componentes or {}
-    n90 = float(comp.get("Indemnizacion_90") or 0.0)
-    nPA = float(comp.get("Prima_Antiguedad") or 0.0)
-    nAgu = float(comp.get("Aguinaldo_Prop") or 0.0)
-    nVac = float(comp.get("Vacaciones_Prop") or 0.0)
-    nPV  = float(comp.get("Prima_Vac_Prop") or 0.0)
+    n90  = float(comp.get("Indemnizacion_90") or 0.0)
+    nPA  = float(comp.get("Prima_Antiguedad") or 0.0)
+    nAgu = float(comp.get("Aguinaldo_Prop")   or 0.0)
+    nVac = float(comp.get("Vacaciones_Prop")  or 0.0)
+    nPV  = float(comp.get("Prima_Vac_Prop")   or 0.0)
 
-    def fallback():
+    def fallback() -> str:
         intro = (
-            f"{nombre}, gracias por contarnos tu caso. Entendemos que esta situación puede generar incertidumbre. "
-            f"Con la información disponible, lo ubicamos como {tipo_h} con una antigüedad aproximada de {antig_txt} "
-            f"(del {ini.isoformat()} al {fin.isoformat()}) y un salario mensual considerado de ${salario_mensual:,.2f} "
+            f"{nombre}, gracias por contarnos tu caso. "
+            f"Con la información disponible, lo ubicamos como {tipo_h} con una antigüedad "
+            f"aproximada de {antig_txt} (del {ini.isoformat()} al {fin.isoformat()}) "
+            f"y un salario mensual considerado de ${salario_mensual:,.2f} "
             f"(salario diario aproximado ${sd:,.2f})."
         )
-        if total_estimado and total_estimado > 0:
-            intro += f" Con esos datos, el total estimado preliminar es de ${total_estimado:,.2f}."
+        if total_estimado > 0:
+            intro += f" El total estimado preliminar es de ${total_estimado:,.2f}."
 
         cuerpo = (
-            "Este estimado es referencial y puede cambiar al confirmar salario integrado real, pagos previos y prestaciones adicionales. "
-            "En términos prácticos, el cálculo considera prestaciones proporcionales (aguinaldo, vacaciones y prima vacacional) "
-            + ("y, al tratarse de despido, puede incluir indemnización (90 días) y prima de antigüedad." if str(tipo_caso).strip()=="1"
-               else "y pagos pendientes vinculados a finiquito, según lo efectivamente cubierto.")
+            "Este estimado es referencial y puede cambiar al confirmar salario integrado "
+            "real, pagos previos y prestaciones adicionales. "
+            "El cálculo considera prestaciones proporcionales (aguinaldo, vacaciones y prima "
+            "vacacional)"
+            + (" y, al tratarse de despido, incluye indemnización (90 días) y prima de antigüedad."
+               if str(tipo_caso).strip() == "1"
+               else " y pagos pendientes vinculados al finiquito.")
         )
 
         pasos = (
-            "Para personalizarlo con precisión, te recomendamos:\n"
-            "• Reunir recibos de nómina/transferencias, contrato (si existe) y tu historial IMSS: esto confirma salario y fechas.\n"
-            "• No firmar renuncia, finiquito o documentos en blanco sin revisión: evita perder margen de negociación.\n"
-            "• Guardar mensajes/correos/evidencia del motivo y del día del evento: ayuda a definir estrategia y alcance.\n"
-            "Con esa información, una abogada revisa contigo el escenario y se decide la ruta más conveniente (negociación o acción legal) conforme a evidencia."
+            "Para personalizarlo con precisión te recomendamos:\n"
+            "• Reunir recibos de nómina o transferencias, contrato (si existe) e historial IMSS.\n"
+            "• No firmar renuncia, finiquito o documentos en blanco sin revisión previa.\n"
+            "• Guardar mensajes, correos o evidencia del motivo y fecha del evento.\n"
+            "Con esa información, una abogada revisa el escenario y define la ruta más conveniente."
         )
 
-        cierre = f"Tu abogada asignada es {abogado_nombre}; en breve te contactará para continuar el seguimiento." if abogado_nombre else \
-                 "En breve una abogada te contactará para continuar el seguimiento."
+        cierre = (
+            f"Tu abogada asignada es {abogado_nombre}; en breve te contactará."
+            if abogado_nombre
+            else "En breve una abogada te contactará para el seguimiento."
+        )
 
         txt = f"{intro}\n\n{cuerpo}\n\n{pasos}\n\n{cierre}"
         if len(txt.split()) > 300:
@@ -534,20 +770,19 @@ def build_analisis_web_gpt(
     if not (OPENAI_API_KEY and OpenAI):
         return fallback()
 
+    # Armar contexto legal para el prompt
     contexto_items = []
     for t in (temas or [])[:3]:
-        titulo = (t.get("Titulo_Visible") or "Punto legal relevante").strip()
+        titulo   = (t.get("Titulo_Visible")   or "Punto legal relevante").strip()
         contenido = _clip_chars((t.get("Contenido_Legal") or "").strip(), 420)
-        if contenido:
-            contexto_items.append(f"- {titulo}: {contenido}")
-        else:
-            contexto_items.append(f"- {titulo}")
+        contexto_items.append(f"- {titulo}: {contenido}" if contenido else f"- {titulo}")
     contexto = "\n".join(contexto_items).strip() or "(Sin entradas específicas; usa criterios generales de la LFT.)"
 
     comp_txt = (
-        f"Montos estimados (si aplica): "
-        f"90 días=${n90:,.2f}; prima antigüedad=${nPA:,.2f}; aguinaldo prop=${nAgu:,.2f}; "
-        f"vacaciones prop=${nVac:,.2f}; prima vac prop=${nPV:,.2f}; total=${float(total_estimado or 0.0):,.2f}."
+        f"Montos estimados: "
+        f"90 días=${n90:,.2f}; prima antigüedad=${nPA:,.2f}; "
+        f"aguinaldo prop=${nAgu:,.2f}; vacaciones prop=${nVac:,.2f}; "
+        f"prima vac prop=${nPV:,.2f}; total=${float(total_estimado or 0.0):,.2f}."
     )
 
     try:
@@ -559,13 +794,13 @@ def build_analisis_web_gpt(
                 "content": (
                     "Eres un asistente legal en derecho laboral mexicano. "
                     "Escribe con tono humano, cálido y profesional. "
-                    "Explica en lenguaje sencillo, sin tecnicismos pesados. "
+                    "Lenguaje sencillo, sin tecnicismos pesados. "
                     "NO uses Markdown. "
                     "Objetivo: 230 a 290 palabras (ideal ~250). "
-                    "Incluye 3 a 5 viñetas con '•' solo en la sección de pasos. "
+                    "Incluye 3 a 5 viñetas con • solo en la sección de pasos. "
                     "Evita frases genéricas; usa los datos proporcionados. "
-                    "No incluyas la leyenda final; el sistema la añadirá."
-                )
+                    "No incluyas la leyenda final de orientación informativa; el sistema la añade."
+                ),
             },
             {
                 "role": "user",
@@ -577,43 +812,48 @@ def build_analisis_web_gpt(
                     f"- Salario mensual considerado: ${salario_mensual:,.2f} (SD aprox. ${sd:,.2f})\n"
                     f"- Descripción del usuario: {desc if desc else '(sin descripción)'}\n"
                     f"- {comp_txt}\n"
-                    f"- Abogada asignada: {(abogado_nombre or '(no especificada)')}\n\n"
+                    f"- Abogada asignada: {abogado_nombre or '(no especificada)'}\n\n"
                     f"Base de conocimiento (usa solo lo relevante y de forma natural):\n{contexto}\n\n"
-                    "Requisitos estrictos:\n"
-                    "1) Empieza con empatía real y referencia breve a algo del relato (si hay descripción).\n"
+                    "Requisitos:\n"
+                    "1) Empieza con empatía real referenciando algo del relato (si hay descripción).\n"
                     "2) Explica por qué el total es preliminar y qué factores lo mueven.\n"
-                    "3) Explica en 1 párrafo qué incluye el cálculo para este tipo de caso, usando al menos 3 montos.\n"
-                    "4) Da un plan de acción en viñetas (3 a 5) y en cada viñeta agrega una razón corta.\n"
-                    "5) Cierra indicando que una abogada dará seguimiento por WhatsApp (menciona el nombre si se proporcionó).\n"
-                )
-            }
+                    "3) Explica qué incluye el cálculo usando al menos 3 montos.\n"
+                    "4) Plan de acción en viñetas (3 a 5), cada una con una razón corta.\n"
+                    "5) Cierra indicando que una abogada dará seguimiento por WhatsApp.\n"
+                ),
+            },
         ]
 
         resp = client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=messages,
             temperature=0.6,
-            max_tokens=800
+            max_tokens=800,
         )
 
         txt = (resp.choices[0].message.content or "").strip()
         if not txt:
             return fallback()
 
+        # Eliminar cualquier leyenda final que GPT haya incluido por si acaso
         txt = re.sub(r"(?is)\n*orientación informativa;.*$", "", txt).strip()
 
-        w = len(txt.split())
-        if w > 310:
+        if len(txt.split()) > 310:
             txt = _clip_words(txt, 285)
         if len(txt.split()) < 180:
             return fallback()
 
         return txt + "\n\nOrientación informativa; no constituye asesoría legal definitiva."
+
     except Exception:
         return fallback()
 
 
-def upsert_abogados_admin(sh, lead_id: str, abogado_id: str):
+# ─────────────────────────────────────────────
+# Abogados Admin — upsert
+# ─────────────────────────────────────────────
+
+def upsert_abogados_admin(sh, lead_id: str, abogado_id: str) -> None:
     try:
         ws = open_worksheet(sh, TAB_ABOG_ADMIN)
     except Exception:
@@ -623,14 +863,18 @@ def upsert_abogados_admin(sh, lead_id: str, abogado_id: str):
         existing = find_row_by_value(ws, "ID_Lead", lead_id)
         if existing:
             h = build_header_map(ws)
-            update_row_cells(ws, existing, {"ID_Abogado": abogado_id, "Estatus": "ASIGNADO"}, hmap=h)
+            update_row_cells(
+                ws, existing,
+                {"ID_Abogado": abogado_id, "Estatus": "ASIGNADO"},
+                hmap=h,
+            )
             return
     except Exception:
         pass
 
     try:
-        header = with_backoff(ws.row_values, 1)
-        h = build_header_map(ws)
+        header  = with_backoff(ws.row_values, 1)
+        h       = build_header_map(ws)
         row_out = [""] * len(header)
 
         def set_cell(col: str, val: str):
@@ -638,87 +882,114 @@ def upsert_abogados_admin(sh, lead_id: str, abogado_id: str):
             if c and 1 <= c <= len(row_out):
                 row_out[c - 1] = val
 
-        set_cell("ID_Admin", uuid.uuid4().hex[:12])
-        set_cell("ID_Lead", lead_id)
-        set_cell("ID_Abogado", abogado_id)
-        set_cell("Estatus", "ASIGNADO")
-        set_cell("Acepto_Asesoria", "")
+        set_cell("ID_Admin",            uuid.uuid4().hex[:12])
+        set_cell("ID_Lead",             lead_id)
+        set_cell("ID_Abogado",          abogado_id)
+        set_cell("Estatus",             "ASIGNADO")
+        set_cell("Acepto_Asesoria",     "")
         set_cell("Enviar_Cuestionario", "")
-        set_cell("Proxima_Fecha_Evento", "")
-        set_cell("Notas", "")
+        set_cell("Proxima_Fecha_Evento","")
+        set_cell("Notas",               "")
 
         with_backoff(ws.append_row, row_out, value_input_option="RAW")
     except Exception:
         return
 
 
-# --------------------
-# Main job
-# --------------------
-def process_lead(lead_id: str):
-    if not GOOGLE_SHEET_NAME:
-        raise RuntimeError("Falta GOOGLE_SHEET_NAME.")
+# ─────────────────────────────────────────────
+# Job principal
+# ─────────────────────────────────────────────
 
-    sh = open_spreadsheet(GOOGLE_SHEET_NAME)
+def process_lead(lead_id: str) -> dict:
+    """
+    Job principal invocado por el worker cuando el lead llega al paso EN_PROCESO.
+
+    Pasos:
+      1. Lee el lead de BD_Leads.
+      2. Asigna abogada (round-robin o VIP).
+      3. Parsea fechas (día por defecto = 1 si no viene).
+      4. Calcula estimación detallada.
+      5. Selecciona conocimiento ANALISIS de Conocimiento_AI.
+      6. Genera análisis web con GPT (~250 palabras).
+      7. Actualiza BD_Leads con todos los resultados.
+      8. Notifica a la abogada por plantilla de WhatsApp.
+      9. Envía mensaje de estimación al cliente por WhatsApp.
+    """
+    if not GOOGLE_SHEET_NAME:
+        raise RuntimeError("Falta GOOGLE_SHEET_NAME en variables de entorno.")
+
+    sh       = open_spreadsheet(GOOGLE_SHEET_NAME)
     ws_leads = open_worksheet(sh, TAB_LEADS)
     ws_abog  = open_worksheet(sh, TAB_ABOG)
     ws_sys   = open_worksheet(sh, TAB_SYS)
 
     row = find_row_by_value(ws_leads, "ID_Lead", lead_id)
     if not row:
-        raise RuntimeError(f"Lead no encontrado: {lead_id}")
+        raise RuntimeError(f"Lead no encontrado en BD_Leads: {lead_id}")
 
-    h = build_header_map(ws_leads)
+    h    = build_header_map(ws_leads)
     vals = with_backoff(ws_leads.row_values, row)
 
-    def get(name):
+    def get(name: str) -> str:
         c = col_idx(h, name)
-        return (vals[c-1] if c and c-1 < len(vals) else "").strip()
+        return (vals[c - 1] if c and c - 1 < len(vals) else "").strip()
 
+    # Marcar como en proceso
     update_row_cells(ws_leads, row, {
         "Procesar_AI_Status": "RUNNING",
-        "Ultimo_Error": "",
+        "Ultimo_Error":       "",
         "Ultima_Actualizacion": now_iso(),
     }, hmap=h)
 
     syscfg = read_sys_config(ws_sys)
 
     try:
-        telefono = get("Telefono")
-        nombre = get("Nombre") or "Hola"
-        apellido = get("Apellido")
+        # ── Leer datos del lead ──
+        telefono   = get("Telefono")
+        nombre     = get("Nombre") or "Hola"
+        apellido   = get("Apellido")
         cliente_full = (f"{nombre} {apellido}".strip() if apellido else nombre).strip()
 
-        tipo_caso = get("Tipo_Caso")
-        salario = money_to_float(get("Salario_Mensual"))
+        tipo_caso   = get("Tipo_Caso")
+        salario     = money_to_float(get("Salario_Mensual"))
         descripcion = get("Descripcion_Situacion")
 
-        ini = _parse_date_parts(h, vals, "Inicio")
-        fin = _parse_date_parts(h, vals, "Fin")
+        # ── Fechas con día por defecto = 1 ──
+        ini = _parse_date_parts_safe(h, vals, "Inicio")
+        fin = _parse_date_parts_safe(h, vals, "Fin")
         if fin < ini:
-            raise ValueError("Fecha fin es menor a fecha inicio.")
+            raise ValueError(
+                f"La fecha de fin ({fin.isoformat()}) es anterior a la de inicio ({ini.isoformat()})."
+            )
 
-        abogado_id, abogado_nombre, abogado_tel = pick_abogado_secuencial(ws_abog, ws_sys, salario, syscfg)
+        # ── Asignación de abogada ──
+        abogado_id, abogado_nombre, abogado_tel = pick_abogado_secuencial(
+            ws_abog, ws_sys, salario, syscfg
+        )
 
+        # ── Cálculo de indemnización ──
         salario_min_diario = safe_float(syscfg.get("SALARIO_MIN_DIARIO") or "0")
-
         desglose_txt, total_estimado, comp = calc_estimacion_detallada(
             tipo_caso=tipo_caso,
             salario_mensual=salario,
             ini=ini,
             fin=fin,
-            salario_min_diario=salario_min_diario
+            salario_min_diario=salario_min_diario,
         )
 
-        con_rows = []
+        # ── Conocimiento AI (contexto ANALISIS para el reporte final) ──
+        con_rows: list[dict] = []
         try:
-            ws_con = open_worksheet(sh, TAB_CONOCIMIENTO_AI)
+            ws_con   = open_worksheet(sh, TAB_CONOCIMIENTO_AI)
             con_rows = load_conocimiento(ws_con)
         except Exception:
             con_rows = []
 
-        temas = select_conocimiento(con_rows, descripcion, tipo_caso, k=3)
+        temas = select_conocimiento(
+            con_rows, descripcion, tipo_caso, k=3, contexto="ANALISIS"
+        )
 
+        # ── Análisis web (~250 palabras) ──
         analisis_web = build_analisis_web_gpt(
             nombre=nombre,
             tipo_caso=tipo_caso,
@@ -729,12 +1000,13 @@ def process_lead(lead_id: str):
             temas=temas,
             total_estimado=total_estimado,
             componentes=comp,
-            abogado_nombre=abogado_nombre
+            abogado_nombre=abogado_nombre,
         )
 
         resumen_wa = build_resumen_whatsapp(tipo_caso, nombre)
 
-        token = uuid.uuid4().hex[:18]
+        # ── Token y links ──
+        token    = uuid.uuid4().hex[:18]
         base_url = (syscfg.get("RUTA_REPORTE") or syscfg.get("BASE_URL_WEB") or "").strip()
         if base_url and not base_url.endswith("/") and "?" not in base_url:
             base_url += "/"
@@ -742,70 +1014,75 @@ def process_lead(lead_id: str):
 
         link_abog = ""
         if abogado_tel:
-            tnorm = "".join([c for c in abogado_tel if c.isdigit() or c == "+"])
+            tnorm = "".join(c for c in abogado_tel if c.isdigit() or c == "+")
             if tnorm:
-                link_abog = f"https://wa.me/{tnorm.replace('+','')}"
+                link_abog = f"https://wa.me/{tnorm.replace('+', '')}"
 
+        # ── Mensaje al cliente ──
         mensaje_final = (
             f"✅ {nombre}, ya tengo tu *estimación preliminar*.\n\n"
             f"💰 *Total estimado:* ${total_estimado:,.2f}\n\n"
             f"{resumen_wa}\n\n"
-            f"👩⚖️ Tu abogada asignada es *{abogado_nombre}* y se comunicará contigo muy pronto.\n"
+            f"👩⚖️ Tu abogada asignada es *{abogado_nombre}* "
+            "y se comunicará contigo muy pronto.\n"
         )
         if link_reporte:
             mensaje_final += f"\n📄 Ver desglose en web: {link_reporte}\n"
         mensaje_final += "\n(Orientación informativa; no constituye asesoría legal.)"
 
+        # ── Actualizar BD_Leads ──
         update_row_cells(ws_leads, row, {
-            "Analisis_AI": analisis_web,
-            "Resultado_Calculo": desglose_txt,
-            "Total_Estimado": f"{total_estimado:.2f}",
+            "Analisis_AI":            analisis_web,
+            "Resultado_Calculo":      desglose_txt,
+            "Total_Estimado":         f"{total_estimado:.2f}",
 
-            "Abogado_Asignado_ID": abogado_id,
-            "Abogado_Asignado_Nombre": abogado_nombre,
-            "Token_Reporte": token,
-            "Link_Reporte_Web": link_reporte,
-            "Link_WhatsApp": link_abog,
+            "Abogado_Asignado_ID":    abogado_id,
+            "Abogado_Asignado_Nombre":abogado_nombre,
+            "Token_Reporte":          token,
+            "Link_Reporte_Web":       link_reporte,
+            "Link_WhatsApp":          link_abog,
 
-            "Fecha_Inicio_Laboral": ini.isoformat(),
-            "Fecha_Fin_Laboral": fin.isoformat(),
-            "Es_Cliente": "1",
+            "Fecha_Inicio_Laboral":   ini.isoformat(),
+            "Fecha_Fin_Laboral":      fin.isoformat(),
+            "Es_Cliente":             "1",
 
-            "Indemnizacion_90": f"{comp['Indemnizacion_90']:.2f}",
-            "Indemnizacion_20": f"{comp['Indemnizacion_20']:.2f}",
-            "Prima_Antiguedad": f"{comp['Prima_Antiguedad']:.2f}",
-            "Aguinaldo_Prop": f"{comp['Aguinaldo_Prop']:.2f}",
-            "Vacaciones_Prop": f"{comp['Vacaciones_Prop']:.2f}",
-            "Prima_Vac_Prop": f"{comp['Prima_Vac_Prop']:.2f}",
-            "Vac_Dias_Base": str(comp["Vac_Dias_Base"]),
+            "Indemnizacion_90":       f"{comp['Indemnizacion_90']:.2f}",
+            "Indemnizacion_20":       f"{comp['Indemnizacion_20']:.2f}",
+            "Prima_Antiguedad":       f"{comp['Prima_Antiguedad']:.2f}",
+            "Aguinaldo_Prop":         f"{comp['Aguinaldo_Prop']:.2f}",
+            "Vacaciones_Prop":        f"{comp['Vacaciones_Prop']:.2f}",
+            "Prima_Vac_Prop":         f"{comp['Prima_Vac_Prop']:.2f}",
+            "Vac_Dias_Base":          str(comp["Vac_Dias_Base"]),
 
-            "Ultimo_Error": "",
-            "Ultima_Actualizacion": now_iso(),
+            "Ultimo_Error":           "",
+            "Ultima_Actualizacion":   now_iso(),
         }, hmap=h)
 
         upsert_abogados_admin(sh, lead_id, abogado_id)
 
-        # ✅ TEMPLATE A ABOGADA (nuevo caso asignado) — con dedupe si existen columnas
+        # ── Notificación a la abogada (plantilla Twilio, con dedupe) ──
         already_sent = ""
         if "Notif_Abogada_NuevoCaso" in h:
             try:
-                vals2 = with_backoff(ws_leads.row_values, row)
-                idx = h.get("Notif_Abogada_NuevoCaso")
-                already_sent = (vals2[idx-1] if idx and idx-1 < len(vals2) else "").strip()
+                vals2       = with_backoff(ws_leads.row_values, row)
+                idx         = h.get("Notif_Abogada_NuevoCaso")
+                already_sent = (vals2[idx - 1] if idx and idx - 1 < len(vals2) else "").strip()
             except Exception:
                 already_sent = ""
 
         if not abogado_tel:
             _safe_update(ws_leads, row, {
-                "Notif_Abogada_NuevoCaso_Det": "NO_ENVIADO: abogado_tel vacío (revisar Cat_Abogados: Telefono_Aboga/Teléfono_Registro)",
+                "Notif_Abogada_NuevoCaso_Det": (
+                    "NO_ENVIADO: abogado_tel vacío "
+                    "(revisar Cat_Abogados: Telefono_Aboga / Teléfono_Registro)"
+                ),
             }, hmap=h)
 
         if abogado_tel and not already_sent:
-            tipo_h = "Despido" if str(tipo_caso).strip() == "1" else ("Renuncia" if str(tipo_caso).strip() == "2" else "Caso")
+            tipo_h    = "Despido" if str(tipo_caso).strip() == "1" else (
+                         "Renuncia" if str(tipo_caso).strip() == "2" else "Caso")
             total_txt = f"${total_estimado:,.2f} MXN"
-
-            # ✅ SIN saltos de línea dentro de variable (mejor para Twilio templates)
-            detalle = f"Tipo: {tipo_h} Total: {total_txt} Reporte: {link_reporte or ''}"
+            detalle   = f"Tipo: {tipo_h} Total: {total_txt} Reporte: {link_reporte or ''}"
 
             okA, detA = send_whatsapp_template_safe(
                 to_number=abogado_tel,
@@ -813,44 +1090,97 @@ def process_lead(lead_id: str):
                 variables={
                     "1": cliente_full or "Cliente",
                     "2": _to_e164(telefono),
-                    "3": detalle
-                }
+                    "3": detalle,
+                },
             )
+            _safe_update(ws_leads, row, {
+                "Notif_Abogada_NuevoCaso":     now_iso() if okA else "",
+                "Notif_Abogada_NuevoCaso_Det": (
+                    f"{okA} {detA}" if okA else f"FALLO_ENVIO: {detA}"
+                )[:240],
+            }, hmap=h)
 
-            if okA:
-                _safe_update(ws_leads, row, {
-                    "Notif_Abogada_NuevoCaso": now_iso(),
-                    "Notif_Abogada_NuevoCaso_Det": (f"{okA} {detA}")[:240],
-                }, hmap=h)
-            else:
-                _safe_update(ws_leads, row, {
-                    "Notif_Abogada_NuevoCaso_Det": (f"FALLO_ENVIO: {detA}")[:240],
-                }, hmap=h)
-
-        # WhatsApp al cliente (sesión)
+        # ── Mensaje al cliente ──
         ok1, det1 = send_whatsapp_safe(telefono, mensaje_final)
 
-        if ok1:
-            update_row_cells(ws_leads, row, {
-                "Procesar_AI_Status": "DONE",
-                "ESTATUS": "CLIENTE_MENU",
-                "Ultimo_Error": "",
-                "Ultima_Actualizacion": now_iso(),
-            }, hmap=h)
-        else:
-            update_row_cells(ws_leads, row, {
-                "Procesar_AI_Status": "DONE_SEND_ERROR",
-                "ESTATUS": "EN_PROCESO",
-                "Ultimo_Error": f"send1={ok1}({det1})"[:450],
-                "Ultima_Actualizacion": now_iso(),
-            }, hmap=h)
+        update_row_cells(ws_leads, row, {
+            "Procesar_AI_Status": "DONE" if ok1 else "DONE_SEND_ERROR",
+            "ESTATUS":            "CLIENTE_MENU" if ok1 else "EN_PROCESO",
+            "Ultimo_Error":       "" if ok1 else f"send1={ok1}({det1})"[:450],
+            "Ultima_Actualizacion": now_iso(),
+        }, hmap=h)
 
         return {"ok": True, "lead_id": lead_id, "send1": ok1}
 
     except Exception as e:
         update_row_cells(ws_leads, row, {
             "Procesar_AI_Status": "FAILED",
-            "Ultimo_Error": f"{type(e).__name__}: {e}",
+            "Ultimo_Error":       f"{type(e).__name__}: {e}",
             "Ultima_Actualizacion": now_iso(),
         }, hmap=h)
         raise
+
+
+# ─────────────────────────────────────────────
+# Job auxiliar — respuesta empática en tiempo real
+# ─────────────────────────────────────────────
+
+def process_caso_libre(lead_id: str) -> dict:
+    """
+    Job ligero invocado cuando el lead termina el paso CASO_LIBRE
+    (acaba de escribir la descripción libre de su situación).
+
+    Flujo:
+      1. Lee la descripción del lead.
+      2. Carga Conocimiento_AI contexto CONVERSACIONAL.
+      3. Genera respuesta empática con GPT (3-4 oraciones).
+      4. Envía la respuesta al lead por WhatsApp.
+      5. Actualiza estado a AI_EMPATIA en BD_Leads.
+
+    El manejador de mensajes del bot debe invocar este job en lugar de
+    process_lead cuando el estado sea CASO_LIBRE y el input sea texto libre.
+    """
+    if not GOOGLE_SHEET_NAME:
+        raise RuntimeError("Falta GOOGLE_SHEET_NAME en variables de entorno.")
+
+    sh       = open_spreadsheet(GOOGLE_SHEET_NAME)
+    ws_leads = open_worksheet(sh, TAB_LEADS)
+
+    row = find_row_by_value(ws_leads, "ID_Lead", lead_id)
+    if not row:
+        raise RuntimeError(f"Lead no encontrado en BD_Leads: {lead_id}")
+
+    h    = build_header_map(ws_leads)
+    vals = with_backoff(ws_leads.row_values, row)
+
+    def get(name: str) -> str:
+        c = col_idx(h, name)
+        return (vals[c - 1] if c and c - 1 < len(vals) else "").strip()
+
+    telefono    = get("Telefono")
+    descripcion = get("Descripcion_Situacion")
+    tipo_hint   = get("Tipo_Caso")  # puede estar vacío en este punto
+
+    # Cargar conocimiento conversacional
+    con_rows: list[dict] = []
+    try:
+        ws_con   = open_worksheet(sh, TAB_CONOCIMIENTO_AI)
+        con_rows = load_conocimiento(ws_con)
+    except Exception:
+        con_rows = []
+
+    respuesta = build_respuesta_empatica(
+        descripcion=descripcion,
+        con_rows=con_rows,
+        tipo_caso_hint=tipo_hint,
+    )
+
+    ok, det = send_whatsapp_safe(telefono, respuesta)
+
+    _safe_update(ws_leads, row, {
+        "ESTATUS":              "AI_EMPATIA" if ok else "CASO_LIBRE",
+        "Ultimo_Error":         "" if ok else f"send_empatia={det}"[:450],
+        "Ultima_Actualizacion": now_iso(),
+    }, hmap=h)
+
+    return {"ok": ok, "lead_id": lead_id, "send_empatia": ok, "detalle": det}
