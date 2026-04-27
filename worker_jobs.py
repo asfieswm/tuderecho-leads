@@ -589,13 +589,9 @@ def build_respuesta_empatica(
     tipo_caso_hint: str = "",
 ) -> str:
     """
-    Se llama justo después de que el lead escribe su descripción libre (paso CASO_LIBRE).
-    Genera una respuesta conversacional (4-6 oraciones) que:
-      1. Muestra empatía real referenciando algo de lo que escribió.
-      2. Valida que la situación tiene solución legal.
-      3. Lanza UNA pregunta abierta o reflexiva que invite a interactuar.
-      4. Refuerza el valor de conectarse con una abogada (call to action suave).
-      5. Termina con la pregunta obligatoria de tipo de caso.
+    Genera una respuesta conversacional empática. Si OpenAI falla, 
+    usa un fallback con copywriting persuasivo directo, asumiendo 
+    que el nombre del lead aún no se ha capturado en el flujo.
     """
     temas_conv = select_conocimiento(
         con_rows, descripcion, tipo_caso_hint, k=2, contexto="CONVERSACIONAL"
@@ -608,42 +604,44 @@ def build_respuesta_empatica(
             contexto_txt += f"- {contenido}\n"
     contexto_txt = contexto_txt.strip()
 
-    # ── Fallback sin OpenAI ──
+    # ── Fallback sin OpenAI (Copywriting directo y empático) ──
     def fallback() -> str:
         if str(tipo_caso_hint).strip() == "1":
             cuerpo = (
-                "Gracias por contarnos lo que viviste. Un despido siempre genera mucha "
-                "incertidumbre, y es completamente válido que te sientas así.\n\n"
-                "Lo que describes puede tener solución legal, y muchas personas en tu "
-                "misma situación han podido recuperar lo que les corresponde.\n\n"
-                "¿Hay algo en particular que te preocupe más en este momento: "
-                "el dinero que te deben, los tiempos para reclamar, o cómo funciona el proceso?\n\n"
-                "Cuéntame, estoy aquí para orientarte. Y recuerda que conectarte con "
-                "una abogada especializada puede marcar una gran diferencia en el resultado.\n\n"
+                "He leído con mucha atención lo que nos cuentas. "
+                "Entiendo perfectamente la frustración y el estrés que genera un despido; "
+                "es una situación que desestabiliza a cualquiera y es súper válido que te sientas así.\n\n"
+                "Quiero darte tranquilidad: lo que viviste tiene solución legal y la ley está de tu lado "
+                "para recuperar lo que por derecho te corresponde.\n\n"
+                "Para mí es muy importante entender tu prioridad. ¿Qué te genera más inquietud ahorita: "
+                "saber exactamente cuánto dinero te deben, o entender cómo es el proceso para reclamarlo?\n\n"
+                "Cuéntame con confianza. Conectarte con una de nuestras abogadas especializadas "
+                "puede marcar toda la diferencia para que no te vayas con las manos vacías.\n\n"
             )
         elif str(tipo_caso_hint).strip() == "2":
             cuerpo = (
-                "Gracias por compartir tu situación. Renunciar, sobre todo bajo presión "
-                "o en condiciones difíciles, es una decisión muy difícil.\n\n"
-                "Lo que muchas personas no saben es que incluso renunciando conservas "
-                "derechos importantes que el patrón debe respetar.\n\n"
-                "¿Qué es lo que más te inquieta en este momento: si te van a pagar lo "
-                "que te corresponde, los tiempos, o algo más de la situación?\n\n"
-                "Cuéntame con confianza. Una abogada puede revisar tu caso y orientarte "
-                "sin costo para que tomes la mejor decisión.\n\n"
+                "Gracias por la confianza de detallarme tu situación. "
+                "Sé que tomar la decisión de renunciar (o verse presionado a hacerlo) "
+                "es muy desgastante y genera muchas dudas.\n\n"
+                "Lo que muchas empresas no dicen es que, incluso al renunciar, "
+                "conservas derechos irrenunciables que te tienen que pagar sí o sí.\n\n"
+                "¿Qué es lo que más te preocupa en este momento: que no te quieran pagar tu finiquito completo, "
+                "los tiempos que se están tomando, o alguna otra actitud de la empresa?\n\n"
+                "Dime qué piensas. Que una abogada revise tu caso sin costo te ayudará a "
+                "dar el siguiente paso con total seguridad.\n\n"
             )
         else:
             cuerpo = (
-                "Gracias por contarnos tu situación. Lo que describes es más común de "
-                "lo que crees, y tiene solución legal.\n\n"
-                "Muchas personas enfrentan exactamente esto y logran hacer valer sus "
-                "derechos con la orientación correcta.\n\n"
-                "¿Qué es lo que más te preocupa en este momento: el proceso, los "
-                "tiempos, o lo económico?\n\n"
-                "Cuéntame, y recuerda que conectarte con una abogada especializada "
-                "puede marcar la diferencia.\n\n"
+                "Agradezco mucho que te tomes el tiempo de contarnos los detalles. "
+                "Situaciones como la que describes generan muchísima incertidumbre, pero "
+                "quiero que sepas que estamos aquí para darte claridad.\n\n"
+                "Lo que estás pasando es más común de lo que crees y, lo más importante, tiene solución legal.\n\n"
+                "De todo esto, ¿qué es lo que más te quita el sueño en este momento: "
+                "los tiempos del proceso, el tema económico, o saber si tienes las pruebas suficientes?\n\n"
+                "Platícame. Recuerda que la orientación correcta de una abogada puede cambiar por completo "
+                "el resultado a tu favor.\n\n"
             )
-        return cuerpo + "Para darte la orientación más precisa, dime:\n\n¿Fue un despido (1) o presentaste tu renuncia (2)?"
+        return cuerpo + "Para poder perfilar tu caso exacto, solo confírmame:\n\n¿Fue un despido (1) o presentaste tu renuncia (2)?"
 
     if not (OPENAI_API_KEY and OpenAI):
         return fallback()
@@ -657,7 +655,7 @@ def build_respuesta_empatica(
             "Eres Ximena, asistente legal de Tu Derecho Laboral México. "
             "Atiendes por WhatsApp a personas que acaban de vivir un problema laboral. "
             "Tu objetivo es que sientan que los escuchaste de verdad y que quieran seguir "
-            "hablando contigo.\n\n"
+            "hablando contigo. El usuario es anónimo en esta etapa, háblale de tú directamente.\n\n"
             "REGLAS DE FORMATO:\n"
             "- Sin Markdown, sin asteriscos, sin listas, texto plano.\n"
             "- Máximo 6 oraciones en total, idealmente 5.\n"
@@ -894,23 +892,26 @@ def upsert_abogados_admin(
     abogado_id: str,
     nombre_cliente: str = "",
     telefono_normalizado: str = "",
+    descripcion: str = "",          # ← NUEVO parámetro
 ) -> None:
     try:
         ws = open_worksheet(sh, TAB_ABOG_ADMIN)
     except Exception:
         return
 
-    # ── Si ya existe la fila, solo actualiza estado ──
+    # ── Si ya existe la fila (creada por el sistema), solo actualiza ──
+    # Los registros manuales NO tienen ID_Lead → find_row_by_value no los toca.
     try:
         existing = find_row_by_value(ws, "ID_Lead", lead_id)
         if existing:
             h = build_header_map(ws)
             upd = {"ID_Abogado": abogado_id, "Estatus": "ASIGNADO"}
-            # Rellena campos vacíos si los tenemos ahora
             if nombre_cliente:
                 upd["Nombre"] = nombre_cliente
             if telefono_normalizado:
                 upd["Telefono_Normalizado"] = telefono_normalizado
+            if descripcion:                             # ← NUEVO
+                upd["Descripcion_Situacion"] = descripcion
             update_row_cells(ws, existing, upd, hmap=h)
             return
     except Exception:
@@ -927,16 +928,17 @@ def upsert_abogados_admin(
             if c and 1 <= c <= len(row_out):
                 row_out[c - 1] = val
 
-        set_cell("ID_Admin",             uuid.uuid4().hex[:12])
-        set_cell("ID_Lead",              lead_id)
-        set_cell("ID_Abogado",           abogado_id)
-        set_cell("Nombre",               nombre_cliente)
-        set_cell("Telefono_Normalizado", telefono_normalizado)
-        set_cell("Estatus",              "ASIGNADO")
-        set_cell("Acepto_Asesoria",      "")
-        set_cell("Enviar_Cuestionario",  "")
-        set_cell("Proxima_Fecha_Evento", "")
-        set_cell("Notas",                "")
+        set_cell("ID_Admin",              uuid.uuid4().hex[:12])
+        set_cell("ID_Lead",               lead_id)
+        set_cell("ID_Abogado",            abogado_id)
+        set_cell("Nombre",                nombre_cliente)
+        set_cell("Telefono_Normalizado",  telefono_normalizado)
+        set_cell("Descripcion_Situacion", descripcion)   # ← NUEVO
+        set_cell("Estatus",               "ASIGNADO")
+        set_cell("Acepto_Asesoria",       "")
+        set_cell("Enviar_Cuestionario",   "")
+        set_cell("Proxima_Fecha_Evento",  "")
+        set_cell("Notas",                 "")
 
         with_backoff(ws.append_row, row_out, value_input_option="RAW")
     except Exception:
@@ -1105,7 +1107,14 @@ def process_lead(lead_id: str) -> dict:
             "Ultima_Actualizacion":   now_iso(),
         }, hmap=h)
 
-        upsert_abogados_admin(sh, lead_id, abogado_id)
+        upsert_abogados_admin(
+            sh,
+            lead_id,
+            abogado_id,
+            nombre_cliente=cliente_full,
+            telefono_normalizado=_to_e164(telefono),
+            descripcion=descripcion,               # ← NUEVO
+        )
 
         # ── Notificación a la abogada (plantilla Twilio, con dedupe) ──
         already_sent = ""
