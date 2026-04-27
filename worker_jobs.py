@@ -83,6 +83,16 @@ def _to_e164(raw: str) -> str:
     return s
 
 
+def _to_e164_no_plus(raw: str) -> str:
+    """
+    Igual que _to_e164 pero SIN el prefijo '+'.
+    Formato requerido por AppSheet en Telefono_Normalizado.
+    Ej: +5215512345678 → 5215512345678
+    """
+    e = _to_e164(raw)
+    return e.lstrip("+") if e else ""
+
+
 def send_whatsapp_safe(to_number: str, body: str) -> tuple[bool, str]:
     """Envía un mensaje WhatsApp de sesión. No lanza excepción; retorna (ok, detalle)."""
     try:
@@ -895,19 +905,27 @@ def upsert_abogados_admin(
     nombre_cliente: str = "",
     telefono_normalizado: str = "",
     descripcion: str = "",
+    estatus: str = "ASIGNADO",
 ) -> None:
     """
     Crea o actualiza un registro en Abogados_Admin vinculado al lead.
 
-    Columnas AppSheet esperadas:
+    Columnas AppSheet:
       ID_Admin | ID_Lead | ID_Abogado | Estatus | Nombre |
       Telefono_Normalizado | Descripcion_Situacion
 
-    Lógica:
-    - Si ya existe una fila con ese ID_Lead → actualiza SOLO los campos
-      que llegan con valor (nunca borra datos previos de AppSheet).
-    - Si no existe → crea fila nueva con todos los campos.
-    - Registros manuales sin ID_Lead no se tocan.
+    FASE 1 — Registro inicial (nombre + teléfono disponibles):
+      Llamar con abogado_id="A01", estatus="No Asignado".
+      Solo rellena ID_Admin, ID_Lead, Nombre, Telefono_Normalizado.
+      Los demás campos quedan vacíos para AppSheet.
+
+    FASE 2 — Proceso completo (process_lead terminó):
+      Llamar con abogado_id real y estatus="ASIGNADO".
+      Actualiza ID_Abogado, Estatus y los campos que lleguen con valor,
+      sin pisar campos que AppSheet ya haya editado manualmente.
+
+    Nota: Telefono_Normalizado se guarda SIN el prefijo '+' (requerido por AppSheet).
+    Registros manuales sin ID_Lead nunca se tocan.
     """
     try:
         ws = open_worksheet(sh, TAB_ABOG_ADMIN)
@@ -919,20 +937,28 @@ def upsert_abogados_admin(
     except Exception:
         existing_row = None
 
+    # Telefono siempre sin '+' para AppSheet
+    tel_clean = telefono_normalizado.lstrip("+") if telefono_normalizado else ""
+
     if existing_row:
         # ── Actualizar fila existente (respeta datos previos de AppSheet) ──
         try:
             h = build_header_map(ws)
-            # Solo actualizamos los campos que llegan con valor nuevo,
-            # para no pisar campos que AppSheet ya haya modificado manualmente.
-            upd: dict = {"ID_Abogado": abogado_id, "Estatus": "ASIGNADO"}
+            upd: dict = {}
+            # Siempre actualizamos abogado y estatus cuando nos llaman con datos reales
+            if abogado_id:
+                upd["ID_Abogado"] = abogado_id
+            if estatus:
+                upd["Estatus"] = estatus
+            # Campos de contenido: solo si llegan con valor para no pisar ediciones manuales
             if nombre_cliente:
                 upd["Nombre"] = nombre_cliente
-            if telefono_normalizado:
-                upd["Telefono_Normalizado"] = telefono_normalizado
+            if tel_clean:
+                upd["Telefono_Normalizado"] = tel_clean
             if descripcion:
                 upd["Descripcion_Situacion"] = descripcion
-            update_row_cells(ws, existing_row, upd, hmap=h)
+            if upd:
+                update_row_cells(ws, existing_row, upd, hmap=h)
         except Exception:
             pass
         return
@@ -948,16 +974,15 @@ def upsert_abogados_admin(
             if c and 1 <= c <= len(row_out):
                 row_out[c - 1] = val
 
-        # Campos que AppSheet necesita obligatoriamente:
         set_cell("ID_Admin",              uuid.uuid4().hex[:12])
         set_cell("ID_Lead",               lead_id)
         set_cell("ID_Abogado",            abogado_id)
-        set_cell("Estatus",               "ASIGNADO")
+        set_cell("Estatus",               estatus)
         set_cell("Nombre",                nombre_cliente)
-        set_cell("Telefono_Normalizado",  telefono_normalizado)
+        set_cell("Telefono_Normalizado",  tel_clean)
         set_cell("Descripcion_Situacion", descripcion)
 
-        # Campos opcionales que AppSheet puede gestionar después:
+        # Campos que AppSheet gestiona después (se dejan vacíos):
         set_cell("Acepto_Asesoria",       "")
         set_cell("Enviar_Cuestionario",   "")
         set_cell("Proxima_Fecha_Evento",  "")
@@ -966,6 +991,47 @@ def upsert_abogados_admin(
         with_backoff(ws.append_row, row_out, value_input_option="RAW")
     except Exception:
         return
+
+
+def register_lead_inicial(
+    sh,
+    lead_id: str,
+    nombre_cliente: str,
+    telefono_raw: str,
+) -> None:
+    """
+    FASE 1: Se llama en cuanto el bot captura nombre y teléfono del lead,
+    antes de que complete el flujo (salario, fechas, descripción).
+
+    Crea la fila en Abogados_Admin con:
+      - ID_Abogado  = "A01"   (placeholder hasta asignación real)
+      - Estatus     = "No Asignado"
+      - Nombre      = nombre_cliente
+      - Telefono_Normalizado = número sin '+' en formato E.164
+
+    Si la fila ya existe (raro, por reintentos) no hace nada.
+    """
+    try:
+        ws = open_worksheet(sh, TAB_ABOG_ADMIN)
+    except Exception:
+        return
+
+    try:
+        existing_row = find_row_by_value(ws, "ID_Lead", lead_id)
+        if existing_row:
+            return  # Ya existe, no duplicar
+    except Exception:
+        pass
+
+    upsert_abogados_admin(
+        sh=sh,
+        lead_id=lead_id,
+        abogado_id="A01",
+        nombre_cliente=nombre_cliente,
+        telefono_normalizado=_to_e164_no_plus(telefono_raw),
+        descripcion="",
+        estatus="No Asignado",
+    )
 
 
 # ─────────────────────────────────────────────
@@ -1131,16 +1197,17 @@ def process_lead(lead_id: str) -> dict:
             "Ultima_Actualizacion":   now_iso(),
         }, hmap=h)
 
-        # ── Upsert en Abogados_Admin ──
-        # Si ya había un registro previo (creado manualmente en AppSheet),
-        # solo actualiza los campos del sistema sin tocar los que AppSheet gestiona.
+        # ── Upsert en Abogados_Admin (FASE 2: datos completos) ──
+        # Si register_lead_inicial ya creó la fila, la actualiza con la abogada
+        # real y los datos completos. Si por alguna razón no existe, la crea.
         upsert_abogados_admin(
             sh,
             lead_id=lead_id,
             abogado_id=abogado_id,
             nombre_cliente=cliente_full,
-            telefono_normalizado=_to_e164(telefono),
+            telefono_normalizado=_to_e164_no_plus(telefono),
             descripcion=descripcion,
+            estatus="ASIGNADO",
         )
 
         # ── Notificación a la abogada (plantilla Twilio, con dedupe) ──
