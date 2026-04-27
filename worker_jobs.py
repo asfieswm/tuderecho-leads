@@ -497,7 +497,6 @@ def load_conocimiento(ws_con) -> list[dict]:
             continue
 
         # ✅ FIX: si no existe Contexto_Uso, usa Fuente como fallback
-        # (compatibilidad con hojas que usan Fuente = "CONVERSACIONAL")
         contexto_uso = (d.get("Contexto_Uso") or "").strip().upper()
         if not contexto_uso:
             fuente = (d.get("Fuente") or "").strip().upper()
@@ -527,21 +526,10 @@ def select_conocimiento(
 ) -> list[dict]:
     """
     Filtra y rankea filas de Conocimiento_AI por relevancia.
-
-    contexto:
-      "CONVERSACIONAL" → solo filas con Contexto_Uso = CONVERSACIONAL o AMBOS
-      "ANALISIS"       → solo filas con Contexto_Uso = ANALISIS o AMBOS
-      "AMBOS"          → todas las filas activas
-
-    El score combina:
-      +2 por cada keyword que aparezca en la descripción normalizada
-      +1 por cada token de la descripción que aparezca en el título
-      -Prioridad / 10 (menor prioridad = mejor posición en empate)
     """
     desc_n = _normalize_text(descripcion)
     tokens = {t for t in desc_n.split() if len(t) >= 4}
 
-    # Palabras clave extra según tipo de caso
     if str(tipo_caso).strip() == "1":
         tokens |= {"despido", "indemnizacion", "indemnización",
                    "finiquito", "rescision", "rescisión"}
@@ -551,7 +539,6 @@ def select_conocimiento(
 
     scored = []
     for row in con_rows:
-        # Filtro por contexto de uso
         row_ctx = row.get("Contexto_Uso", "AMBOS")
         if contexto != "AMBOS" and row_ctx not in (contexto, "AMBOS"):
             continue
@@ -569,7 +556,6 @@ def select_conocimiento(
             if t in title:
                 score += 1
 
-        # Prioridad como desempate (filas con Prioridad=1 suben ligeramente)
         score -= row.get("Prioridad", 5) / 10.0
 
         if score > 0:
@@ -580,7 +566,7 @@ def select_conocimiento(
 
 
 # ─────────────────────────────────────────────
-# AI — Respuesta empática inmediata (nuevo)
+# AI — Respuesta empática inmediata
 # ─────────────────────────────────────────────
 
 def build_respuesta_empatica(
@@ -589,9 +575,12 @@ def build_respuesta_empatica(
     tipo_caso_hint: str = "",
 ) -> str:
     """
-    Genera una respuesta conversacional empática. Si OpenAI falla, 
-    usa un fallback con copywriting persuasivo directo, asumiendo 
-    que el nombre del lead aún no se ha capturado en el flujo.
+    Genera una respuesta conversacional empática y COMPLETAMENTE PERSONALIZADA
+    basada en lo que el lead escribió. La IA extrae detalles concretos del relato
+    (empresa, situación específica, emociones expresadas) para que el lead sienta
+    que fue leído de verdad, no que recibió una respuesta genérica.
+
+    Si OpenAI falla, usa un fallback con copywriting persuasivo directo.
     """
     temas_conv = select_conocimiento(
         con_rows, descripcion, tipo_caso_hint, k=2, contexto="CONVERSACIONAL"
@@ -604,7 +593,7 @@ def build_respuesta_empatica(
             contexto_txt += f"- {contenido}\n"
     contexto_txt = contexto_txt.strip()
 
-    # ── Fallback sin OpenAI (Copywriting directo y empático) ──
+    # ── Fallback sin OpenAI ──
     def fallback() -> str:
         if str(tipo_caso_hint).strip() == "1":
             cuerpo = (
@@ -646,7 +635,7 @@ def build_respuesta_empatica(
     if not (OPENAI_API_KEY and OpenAI):
         return fallback()
 
-    desc_recortada = _clip_chars(descripcion, 600)
+    desc_recortada = _clip_chars(descripcion, 800)
 
     try:
         client = OpenAI(api_key=OPENAI_API_KEY)
@@ -654,38 +643,54 @@ def build_respuesta_empatica(
         system_prompt = (
             "Eres Ximena, asistente legal de Tu Derecho Laboral México. "
             "Atiendes por WhatsApp a personas que acaban de vivir un problema laboral. "
-            "Tu objetivo es que sientan que los escuchaste de verdad y que quieran seguir "
-            "hablando contigo. El usuario es anónimo en esta etapa, háblale de tú directamente.\n\n"
-            "⚠️ REGLAS DE TONO Y ESTILO (ESTRICTO):\n"
-            "- PROHIBIDO sonar corporativa o como inteligencia artificial.\n"
-            "- PROHIBIDO usar frases de cajón como: 'Lamento mucho', 'Es importante que sepas', 'Abordar esta situación', 'Comprendo tu situación'.\n"
-            "- USA un tono persuasivo, cálido y directo (Copywriting). Usa expresiones como: 'He leído con atención', 'Quiero darte tranquilidad', 'La ley está de tu lado', 'Cuéntame con confianza', 'Platícame', 'Dime qué piensas'.\n\n"
-            "REGLAS DE FORMATO:\n"
-            "- Sin Markdown, sin asteriscos, sin listas, texto plano.\n"
-            "- Máximo 6 oraciones en total, idealmente 4 o 5.\n"
-            "- Usa saltos de línea dobles entre párrafos para facilitar lectura en WhatsApp.\n\n"
-            "ESTRUCTURA OBLIGATORIA (en este orden):\n"
-            "1. Empatía real: menciona el problema concreto que escribieron, pero valídalo como humana (ej. 'Entiendo el estrés que genera...', 'Sé que es muy desgastante...') (1-2 oraciones).\n"
-            "2. Validación tajante: diles directamente que tienen derechos y que eso tiene solución legal a su favor (1 oración).\n"
-            "3. Pregunta abierta conversacional: UNA sola pregunta incisiva para que se desahoguen (ej. qué les preocupa más económicamente o del proceso). Que suene natural, no como formulario (1 oración).\n"
-            "4. Call to action suave: refuerza el valor de que una abogada revise su caso sin costo (1 oración).\n"
-            "5. ÚLTIMA LÍNEA: debe ser exactamente esta y nada más:\n"
-            "¿Fue un despido (1) o presentaste tu renuncia (2)?"
+            "Tu ÚNICA misión en este mensaje es que la persona sienta que REALMENTE leíste "
+            "su historia y que quiera seguir hablando contigo.\n\n"
+
+            "━━ LO MÁS IMPORTANTE ━━\n"
+            "Lee con atención TODO lo que escribió el lead y EXTRAE detalles concretos:\n"
+            "  • Si mencionó una empresa → úsala por su nombre\n"
+            "  • Si mencionó años trabajando → menciónalos\n"
+            "  • Si mencionó una situación específica (acoso, cambio de turno, presión para renunciar, "
+            "    jefe que los llamó, carta que les dieron) → refierete exactamente a eso\n"
+            "  • Si expresó una emoción (miedo, coraje, tristeza, desesperación) → valídala con esas mismas palabras\n"
+            "Nunca respondas de forma genérica. Si el lead lo mencionó, úsalo.\n\n"
+
+            "━━ TONO Y ESTILO ━━\n"
+            "- Cálido, directo, persuasivo. Como una amiga que sabe de leyes, no un corporativo.\n"
+            "- PROHIBIDO: 'Lamento mucho tu situación', 'Es importante que sepas', 'Comprendo tu situación', "
+            "  'Abordar esta problemática', cualquier frase de cajón.\n"
+            "- SÍ usar: 'He leído con atención', 'Eso que describes es...', 'Que te hayan hecho eso de [detalle] "
+            "  es completamente injusto', 'La ley te protege en esto', 'Cuéntame', 'Dime', 'Platícame'.\n"
+            "- Háblale de tú. Sin Markdown, sin asteriscos, texto plano para WhatsApp.\n"
+            "- Máximo 5 párrafos cortos con doble salto de línea entre ellos.\n\n"
+
+            "━━ ESTRUCTURA (en este orden exacto) ━━\n"
+            "1. ESPEJO: Demuestra que leíste su caso. Menciona AL MENOS 2 detalles concretos "
+            "   de lo que escribió. Valida la emoción que expresaron. (2-3 oraciones)\n"
+            "2. VALIDACIÓN LEGAL: Una sola oración tajante: la ley los protege y lo que vivieron "
+            "   tiene solución. Usa el detalle de su caso, no palabras genéricas.\n"
+            "3. PREGUNTA INCISIVA: Una pregunta abierta específica para SU situación "
+            "   (no genérica). Que invite a dar más detalles o a desahogarse. (1 oración)\n"
+            "4. CTA SUAVE: Reforza el valor de hablar con una abogada sin costo. (1 oración)\n"
+            "5. CIERRE FIJO (SIEMPRE la última línea, sin cambios):\n"
+            "   ¿Fue un despido (1) o presentaste tu renuncia (2)?"
         )
+
         user_prompt = (
-            f"El lead escribió esto sobre su situación laboral:\n\n"
+            f"El lead escribió esto sobre su situación:\n\n"
             f"\"{desc_recortada}\"\n\n"
         )
         if contexto_txt:
             user_prompt += (
-                f"Contexto legal de apoyo (úsalo solo si aplica de forma natural, "
-                f"nunca lo cites textualmente):\n{contexto_txt}\n\n"
+                f"Contexto legal de apoyo (úsalo solo si encaja de forma muy natural, "
+                f"nunca lo cites textualmente ni lo fuerces):\n{contexto_txt}\n\n"
             )
         user_prompt += (
-            "Escribe la respuesta siguiendo exactamente la estructura del system prompt. "
-            "Que suene humana, cálida y que invite a seguir la conversación. "
-            "La pregunta abierta del paso 3 debe ser relevante para lo que describieron, "
-            "no genérica. Termina siempre con la pregunta de tipo de caso."
+            "Escribe la respuesta siguiendo la estructura del system prompt.\n"
+            "RECUERDA: el paso 1 (ESPEJO) es el más importante. Menciona detalles CONCRETOS "
+            "de lo que escribió: empresa, tiempo trabajado, situación específica, emoción expresada. "
+            "Si no hay suficiente detalle en lo que escribieron, usa lo que sí hay y haz la "
+            "pregunta incisiva para obtener más. Nunca suenes genérica."
         )
 
         resp = client.chat.completions.create(
@@ -694,8 +699,8 @@ def build_respuesta_empatica(
                 {"role": "system", "content": system_prompt},
                 {"role": "user",   "content": user_prompt},
             ],
-            temperature=0.72,
-            max_tokens=320,
+            temperature=0.85,   # más creatividad / personalización
+            max_tokens=380,     # un poco más de espacio para el detalle
         )
 
         txt = (resp.choices[0].message.content or "").strip()
@@ -802,7 +807,6 @@ def build_analisis_web_gpt(
     if not (OPENAI_API_KEY and OpenAI):
         return fallback()
 
-    # Armar contexto legal para el prompt
     contexto_items = []
     for t in (temas or [])[:3]:
         titulo   = (t.get("Titulo_Visible")   or "Punto legal relevante").strip()
@@ -867,7 +871,6 @@ def build_analisis_web_gpt(
         if not txt:
             return fallback()
 
-        # Eliminar cualquier leyenda final que GPT haya incluido por si acaso
         txt = re.sub(r"(?is)\n*orientación informativa;.*$", "", txt).strip()
 
         if len(txt.split()) > 310:
@@ -891,49 +894,70 @@ def upsert_abogados_admin(
     abogado_id: str,
     nombre_cliente: str = "",
     telefono_normalizado: str = "",
-    descripcion: str = "",          # ← NUEVO parámetro
+    descripcion: str = "",
 ) -> None:
+    """
+    Crea o actualiza un registro en Abogados_Admin vinculado al lead.
+
+    Columnas AppSheet esperadas:
+      ID_Admin | ID_Lead | ID_Abogado | Estatus | Nombre |
+      Telefono_Normalizado | Descripcion_Situacion
+
+    Lógica:
+    - Si ya existe una fila con ese ID_Lead → actualiza SOLO los campos
+      que llegan con valor (nunca borra datos previos de AppSheet).
+    - Si no existe → crea fila nueva con todos los campos.
+    - Registros manuales sin ID_Lead no se tocan.
+    """
     try:
         ws = open_worksheet(sh, TAB_ABOG_ADMIN)
     except Exception:
         return
 
-    # ── Si ya existe la fila (creada por el sistema), solo actualiza ──
-    # Los registros manuales NO tienen ID_Lead → find_row_by_value no los toca.
     try:
-        existing = find_row_by_value(ws, "ID_Lead", lead_id)
-        if existing:
+        existing_row = find_row_by_value(ws, "ID_Lead", lead_id)
+    except Exception:
+        existing_row = None
+
+    if existing_row:
+        # ── Actualizar fila existente (respeta datos previos de AppSheet) ──
+        try:
             h = build_header_map(ws)
-            upd = {"ID_Abogado": abogado_id, "Estatus": "ASIGNADO"}
+            # Solo actualizamos los campos que llegan con valor nuevo,
+            # para no pisar campos que AppSheet ya haya modificado manualmente.
+            upd: dict = {"ID_Abogado": abogado_id, "Estatus": "ASIGNADO"}
             if nombre_cliente:
                 upd["Nombre"] = nombre_cliente
             if telefono_normalizado:
                 upd["Telefono_Normalizado"] = telefono_normalizado
-            if descripcion:                             # ← NUEVO
+            if descripcion:
                 upd["Descripcion_Situacion"] = descripcion
-            update_row_cells(ws, existing, upd, hmap=h)
-            return
-    except Exception:
-        pass
+            update_row_cells(ws, existing_row, upd, hmap=h)
+        except Exception:
+            pass
+        return
 
-    # ── Nueva fila ──
+    # ── Crear fila nueva ──
     try:
         header  = with_backoff(ws.row_values, 1)
         h       = build_header_map(ws)
         row_out = [""] * len(header)
 
-        def set_cell(col: str, val: str):
+        def set_cell(col: str, val: str) -> None:
             c = col_idx(h, col)
             if c and 1 <= c <= len(row_out):
                 row_out[c - 1] = val
 
+        # Campos que AppSheet necesita obligatoriamente:
         set_cell("ID_Admin",              uuid.uuid4().hex[:12])
         set_cell("ID_Lead",               lead_id)
         set_cell("ID_Abogado",            abogado_id)
+        set_cell("Estatus",               "ASIGNADO")
         set_cell("Nombre",                nombre_cliente)
         set_cell("Telefono_Normalizado",  telefono_normalizado)
-        set_cell("Descripcion_Situacion", descripcion)   # ← NUEVO
-        set_cell("Estatus",               "ASIGNADO")
+        set_cell("Descripcion_Situacion", descripcion)
+
+        # Campos opcionales que AppSheet puede gestionar después:
         set_cell("Acepto_Asesoria",       "")
         set_cell("Enviar_Cuestionario",   "")
         set_cell("Proxima_Fecha_Evento",  "")
@@ -960,8 +984,9 @@ def process_lead(lead_id: str) -> dict:
       5. Selecciona conocimiento ANALISIS de Conocimiento_AI.
       6. Genera análisis web con GPT (~250 palabras).
       7. Actualiza BD_Leads con todos los resultados.
-      8. Notifica a la abogada por plantilla de WhatsApp.
-      9. Envía mensaje de estimación al cliente por WhatsApp.
+      8. Upsert en Abogados_Admin (crea si no existe, actualiza si ya hay datos).
+      9. Notifica a la abogada por plantilla de WhatsApp.
+     10. Envía mensaje de estimación al cliente por WhatsApp.
     """
     if not GOOGLE_SHEET_NAME:
         raise RuntimeError("Falta GOOGLE_SHEET_NAME en variables de entorno.")
@@ -1025,7 +1050,7 @@ def process_lead(lead_id: str) -> dict:
             salario_min_diario=salario_min_diario,
         )
 
-        # ── Conocimiento AI (contexto ANALISIS para el reporte final) ──
+        # ── Conocimiento AI ──
         con_rows: list[dict] = []
         try:
             ws_con   = open_worksheet(sh, TAB_CONOCIMIENTO_AI)
@@ -1106,13 +1131,16 @@ def process_lead(lead_id: str) -> dict:
             "Ultima_Actualizacion":   now_iso(),
         }, hmap=h)
 
+        # ── Upsert en Abogados_Admin ──
+        # Si ya había un registro previo (creado manualmente en AppSheet),
+        # solo actualiza los campos del sistema sin tocar los que AppSheet gestiona.
         upsert_abogados_admin(
             sh,
-            lead_id,
-            abogado_id,
+            lead_id=lead_id,
+            abogado_id=abogado_id,
             nombre_cliente=cliente_full,
             telefono_normalizado=_to_e164(telefono),
-            descripcion=descripcion,               # ← NUEVO
+            descripcion=descripcion,
         )
 
         # ── Notificación a la abogada (plantilla Twilio, con dedupe) ──
@@ -1182,18 +1210,14 @@ def process_lead(lead_id: str) -> dict:
 
 def process_caso_libre(lead_id: str) -> dict:
     """
-    Job ligero invocado cuando el lead termina el paso CASO_LIBRE
-    (acaba de escribir la descripción libre de su situación).
+    Job ligero invocado cuando el lead termina el paso CASO_LIBRE.
 
     Flujo:
       1. Lee la descripción del lead.
       2. Carga Conocimiento_AI contexto CONVERSACIONAL.
-      3. Genera respuesta empática con GPT (3-4 oraciones).
+      3. Genera respuesta empática personalizada con GPT.
       4. Envía la respuesta al lead por WhatsApp.
       5. Actualiza estado a AI_EMPATIA en BD_Leads.
-
-    El manejador de mensajes del bot debe invocar este job en lugar de
-    process_lead cuando el estado sea CASO_LIBRE y el input sea texto libre.
     """
     if not GOOGLE_SHEET_NAME:
         raise RuntimeError("Falta GOOGLE_SHEET_NAME en variables de entorno.")
