@@ -48,7 +48,6 @@ def twiml(text: str) -> Response:
     return Response(str(resp), mimetype="text/xml")
 
 def get_queue():
-    """Devuelve Queue si REDIS_URL existe; si no, None."""
     if not REDIS_URL:
         return None
     try:
@@ -82,7 +81,6 @@ def load_config(ws_config):
         rows = with_backoff(ws_config.get_all_records, numericise_ignore=["all"])
     except TypeError:
         rows = with_backoff(ws_config.get_all_records)
-
     cfg = {}
     for r in rows:
         pid = (r.get("ID_Paso") or "").strip()
@@ -94,16 +92,9 @@ def step_type_raw(cfg_row) -> str:
     return (cfg_row.get("Tipo_Entrada") or "").strip().upper()
 
 def infer_step_type(cfg_row) -> str:
-    """
-    Si en Sheet se olvidan Tipo_Entrada (como EN_PROCESO), inferimos:
-    - si hay Opciones_Validas o Siguiente_Si_* -> OPCIONES
-    - si hay Regla_Validacion o Campo_BD... -> TEXTO
-    - si no -> SISTEMA
-    """
     t = step_type_raw(cfg_row)
     if t:
         return t
-
     has_opts = (
         bool((cfg_row.get("Opciones_Validas") or "").strip())
         or bool((cfg_row.get("Siguiente_Si_1") or "").strip())
@@ -113,7 +104,6 @@ def infer_step_type(cfg_row) -> str:
         bool((cfg_row.get("Regla_Validacion") or "").strip())
         or bool((cfg_row.get("Campo_BD_Leads_A_Actualizar") or "").strip())
     )
-
     if has_opts:
         return "OPCIONES"
     if has_text:
@@ -173,13 +163,13 @@ def ensure_lead(ws_leads, from_phone: str):
         if c:
             new_row[c-1] = str(val)
 
-    setv("ID_Lead", lead_id)
-    setv("Telefono", from_phone)
+    setv("ID_Lead",              lead_id)
+    setv("Telefono",             from_phone)
     setv("Telefono_Normalizado", phone_norm)
-    setv("Fuente_Lead", "DESCONOCIDA")
-    setv("Fecha_Registro", now_iso())
+    setv("Fuente_Lead",          "DESCONOCIDA")
+    setv("Fecha_Registro",       now_iso())
     setv("Ultima_Actualizacion", now_iso())
-    setv("ESTATUS", "INICIO")
+    setv("ESTATUS",              "INICIO")
 
     with_backoff(ws_leads.append_row, new_row, value_input_option="USER_ENTERED")
     row2 = find_row_by_value(ws_leads, "Telefono_Normalizado", phone_norm, hmap=h)
@@ -287,32 +277,27 @@ def whatsapp_webhook():
         if estatus == "ESPERANDO_LLAMADA_OPCION":
             if msg_opt == "1" or "si" in msg_lower or "sí" in msg_lower:
                 upd = {
-                    "ESTATUS":               "SOLICITAR_LLAMADA",
-                    "Analisis_AI":           "CLIENTE SOLICITÓ LLAMADA DIRECTA. El proceso de chatbot quedó incompleto.",
-                    "Notas_Abogado":         "PENDIENTE DE REGISTRO MANUAL - CONTACTAR URGENTE",
+                    "ESTATUS":                   "SOLICITAR_LLAMADA",
+                    "Analisis_AI":               "CLIENTE SOLICITÓ LLAMADA DIRECTA. El proceso de chatbot quedó incompleto.",
+                    "Notas_Abogado":             "PENDIENTE DE REGISTRO MANUAL - CONTACTAR URGENTE",
                     "Aviso_Privacidad_Aceptado": "SOLICITADO_EN_LLAMADA",
-                    "Ultima_Actualizacion":  now_iso()
+                    "Ultima_Actualizacion":      now_iso()
                 }
                 update_row_cells(ws_leads, lead_row, upd, hmap=h)
                 return twiml("¡Perfecto! Un asesor de Cuantarchitec te llamará pronto para ayudarte. Gracias.")
             else:
                 update_row_cells(ws_leads, lead_row, {
-                    "ESTATUS":             "CONTACTO_RECHAZADO",
-                    "Analisis_AI":         "El usuario decidió no continuar con el registro ni recibir llamada.",
+                    "ESTATUS":              "CONTACTO_RECHAZADO",
+                    "Analisis_AI":          "El usuario decidió no continuar con el registro ni recibir llamada.",
                     "Ultima_Actualizacion": now_iso()
                 }, hmap=h)
                 return twiml("Entendido. Si en algún momento necesitas asesoría legal, aquí estaremos. ¡Buen día!")
 
         # ==========================================================
-        # ✅ FIX: INTERCEPCIÓN AI_EMPATIA
-        # El job process_caso_libre envió la pregunta empática y terminó
-        # con "¿Fue un despido (1) o presentaste tu renuncia (2)?"
-        # Aquí capturamos la respuesta del usuario y avanzamos al flujo.
+        # INTERCEPCIÓN: AI_EMPATIA
         # ==========================================================
         if estatus == "AI_EMPATIA":
             if msg_opt in ("1", "2"):
-                # Guarda Tipo_Caso y salta directo a NOMBRE
-                # (TIPO_CASO ya fue "respondido" dentro del mensaje empático del job)
                 nxt_emp = "NOMBRE"
                 update_row_cells(ws_leads, lead_row, {
                     "Tipo_Caso":            msg_opt,
@@ -325,19 +310,15 @@ def whatsapp_webhook():
                 log(ws_logs, lead_id, nxt_emp, msg_in_raw, out, telefono=from_phone)
                 return twiml(out)
             else:
-                # Respuesta inválida: re-pregunta tipo de caso
                 out = (
                     get_text(cfg.get("TIPO_CASO", {}))
-                    or (
-                        "Para continuar necesito saber:\n\n"
-                        "¿Fue un despido (1) o presentaste tu renuncia (2)?"
-                    )
+                    or "Para continuar necesito saber:\n\n¿Fue un despido (1) o presentaste tu renuncia (2)?"
                 )
                 log(ws_logs, lead_id, "AI_EMPATIA", msg_in_raw, out,
                     telefono=from_phone, err="invalid_option_ai_empatia")
                 return twiml(out)
 
-        # ── Si está en INICIO y no manda 1/2 -> manda INICIO ──
+        # ── INICIO sin opción válida → reenviar INICIO ──
         if estatus == "INICIO" and msg_opt not in ("1", "2"):
             out = get_text(cfg.get("INICIO", {})) or "Hola, soy Ximena.\n\n1️⃣ Sí\n2️⃣ No"
             out = out.replace("{Nombre}", nombre or "")
@@ -361,13 +342,11 @@ def whatsapp_webhook():
                 valid = ["1", "2"]
 
             if msg_opt not in valid:
-                # excepción: si está en EN_PROCESO no castigamos
                 if estatus == "EN_PROCESO":
                     out = "Sigo preparando tu estimación ✅\nEn cuanto termine te envío el resultado por aquí."
                     log(ws_logs, lead_id, "EN_PROCESO", msg_in_raw, out,
                         telefono=from_phone, err="still_processing")
                     return twiml(out)
-
                 log(ws_logs, lead_id, estatus, msg_in_raw, msg_err,
                     telefono=from_phone, err="invalid_option")
                 return twiml(msg_err)
@@ -379,7 +358,6 @@ def whatsapp_webhook():
             if campo:
                 upd[campo] = msg_opt
 
-            # Rechazó aviso
             if estatus == "AVISO_PRIVACIDAD" and msg_opt == "2":
                 upd["Bloqueado_Por_No_Aceptar"] = "SI"
 
@@ -388,7 +366,6 @@ def whatsapp_webhook():
             # EN_PROCESO → encolar process_lead
             if nxt == "EN_PROCESO":
                 out = get_text(cfg.get("EN_PROCESO", {})) or "Estoy preparando tu estimación…"
-
                 q = get_queue()
                 if q is not None:
                     try:
@@ -454,7 +431,34 @@ def whatsapp_webhook():
 
             update_row_cells(ws_leads, lead_row, upd, hmap=h)
 
-            # ✅ FIX: encolar job empático cuando la transición llega a AI_EMPATIA
+            # ── HOOK Abogados_Admin: se dispara en cuanto el lead da su nombre ──
+            # En ese momento ya tenemos nombre + teléfono, que son los únicos datos
+            # disponibles si el lead abandona antes de terminar el flujo.
+            # Crea la fila con ID_Abogado=A01 y Estatus="No Asignado".
+            # Si el lead completa el flujo, process_lead la actualizará con la
+            # abogada real y Estatus="ASIGNADO".
+            if campo == "Nombre":
+                try:
+                    from worker_jobs import register_lead_inicial
+                    register_lead_inicial(
+                        sh=sh,
+                        lead_id=lead_id,
+                        nombre_cliente=msg_in_raw.strip(),
+                        # phone_norm ya viene sin '+' de ensure_lead (solo dígitos)
+                        telefono_raw=phone_norm,
+                    )
+                    app.logger.info(
+                        f"[ABOG_ADMIN] Registro inicial creado "
+                        f"lead_id={lead_id} nombre={msg_in_raw.strip()}"
+                    )
+                except Exception as e_reg:
+                    # Error no crítico: no interrumpe el flujo del bot
+                    app.logger.warning(
+                        f"[ABOG_ADMIN] Fallo en registro inicial "
+                        f"lead_id={lead_id}: {type(e_reg).__name__}: {e_reg}"
+                    )
+
+            # ── Encolar job empático cuando la transición llega a AI_EMPATIA ──
             if nxt == "AI_EMPATIA":
                 q = get_queue()
                 if q is not None:
@@ -473,13 +477,11 @@ def whatsapp_webhook():
                     app.logger.warning(
                         f"[RQ] Sin Redis — process_caso_libre NO encolado para lead_id={lead_id}"
                     )
-                # Devuelve ack vacío o texto del paso AI_EMPATIA si existe
                 out_ack = get_text(cfg.get("AI_EMPATIA", {})) or ""
                 out_ack = out_ack.replace("{Nombre}", nombre or "")
                 if out_ack:
                     log(ws_logs, lead_id, "AI_EMPATIA", msg_in_raw, out_ack, telefono=from_phone)
                     return twiml(out_ack)
-                # Sin texto configurado: silencio (el job enviará el mensaje empático)
                 return Response("", status=204)
 
             out   = get_text(cfg.get(nxt, {})) or "Gracias. Continuemos…"
@@ -534,7 +536,6 @@ def api_report():
 
         lead = read_lead_row(ws_leads, row_num, h)
 
-        # Antigüedad calculada si no viene ya
         try:
             from datetime import date as _date
             ini_str = (lead.get("Fecha_Inicio_Laboral") or "").strip()
@@ -566,22 +567,12 @@ def api_report():
             pass
 
         allow = [
-            "ID_Lead",
-            "Nombre", "Apellido",
-            "Tipo_Caso",
-            "Salario_Mensual",
-            "Fecha_Inicio_Laboral", "Fecha_Fin_Laboral",
-            "Antiguedad",
-            "Analisis_AI",
-            "Resultado_Calculo",
-            "Total_Estimado",
-            "Indemnizacion_90", "Indemnizacion_20",
-            "Prima_Antiguedad",
-            "Aguinaldo_Prop", "Vacaciones_Prop", "Prima_Vac_Prop",
-            "Vac_Dias_Base",
-            "Abogado_Asignado_Nombre",
-            "Link_WhatsApp",
-            "Token_Reporte",
+            "ID_Lead", "Nombre", "Apellido", "Tipo_Caso", "Salario_Mensual",
+            "Fecha_Inicio_Laboral", "Fecha_Fin_Laboral", "Antiguedad",
+            "Analisis_AI", "Resultado_Calculo", "Total_Estimado",
+            "Indemnizacion_90", "Indemnizacion_20", "Prima_Antiguedad",
+            "Aguinaldo_Prop", "Vacaciones_Prop", "Prima_Vac_Prop", "Vac_Dias_Base",
+            "Abogado_Asignado_Nombre", "Link_WhatsApp", "Token_Reporte",
         ]
 
         data = {k: (lead.get(k, "") or "") for k in allow}
@@ -621,12 +612,12 @@ def reporte():
 
     lead = row_to_dict(values[0], values[idx])
 
-    nombre   = html.escape((lead.get("Nombre")               or "").strip())
-    apellido = html.escape((lead.get("Apellido")             or "").strip())
-    tipo     = html.escape((lead.get("Tipo_Caso")            or "").strip())
+    nombre   = html.escape((lead.get("Nombre")                or "").strip())
+    apellido = html.escape((lead.get("Apellido")              or "").strip())
+    tipo     = html.escape((lead.get("Tipo_Caso")             or "").strip())
     desc     = html.escape((lead.get("Descripcion_Situacion") or "").strip())
-    res      = html.escape((lead.get("Resultado_Calculo")    or "").strip())
-    ai       = html.escape((lead.get("Analisis_AI")          or "").strip())
+    res      = html.escape((lead.get("Resultado_Calculo")     or "").strip())
+    ai       = html.escape((lead.get("Analisis_AI")           or "").strip())
 
     tipo_h = "Despido" if tipo == "1" else ("Renuncia" if tipo == "2" else "Caso laboral")
 
@@ -657,19 +648,16 @@ def reporte():
       <a class="btn" href="#" onclick="window.print();return false;">Imprimir</a>
       <a class="btn2" href="/">Volver</a>
     </div>
-
     <div class="card">
       <h2>Datos del caso</h2>
       <p><b>Nombre:</b> {nombre} {apellido}</p>
       <p><b>Tipo:</b> {tipo_h}</p>
       <p><b>Descripción:</b> {desc}</p>
     </div>
-
     <div class="card">
       <h2>Estimación preliminar</h2>
       <p>{res}</p>
     </div>
-
     <div class="card">
       <h2>Orientación (informativa)</h2>
       <p>{ai}</p>
