@@ -21,8 +21,11 @@ SCOPES = [
 ]
 
 # cache por proceso (gunicorn worker / rq worker)
+# Al inicio del archivo, junto a _GSPREAD_CLIENT
 _GSPREAD_CLIENT = None
-
+_SPREADSHEET_CACHE: Dict[str, Any] = {}   # ← AGREGAR
+_SPREADSHEET_CACHE_TS: Dict[str, float] = {}  # ← AGREGAR
+_SHEET_CACHE_TTL = 120  # segundos         # ← AGREGAR
 
 def with_backoff(fn, *args, retries: int = 6, base: float = 0.8, jitter: float = 0.35, **kwargs):
     """
@@ -196,8 +199,16 @@ def open_spreadsheet(sheet_name: str):
     if not sheet_name:
         raise RuntimeError("Falta GOOGLE_SHEET_NAME.")
     gc = get_gspread_client()
-    return with_backoff(gc.open, sheet_name)
-
+    
+    now = time.time()
+    if sheet_name in _SPREADSHEET_CACHE:
+        if now - _SPREADSHEET_CACHE_TS[sheet_name] < _SHEET_CACHE_TTL:
+            return _SPREADSHEET_CACHE[sheet_name]
+    
+    sh = with_backoff(gc.open, sheet_name)
+    _SPREADSHEET_CACHE[sheet_name] = sh
+    _SPREADSHEET_CACHE_TS[sheet_name] = now
+    return sh
 
 def open_worksheet(sh, tab_name: str):
     if not tab_name:
