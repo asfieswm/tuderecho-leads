@@ -37,6 +37,59 @@ REDIS_QUEUE_NAME = os.environ.get("REDIS_QUEUE_NAME", "ximena").strip()
 app = Flask(__name__)
 
 # =========================
+# Caché de worksheets y config
+# =========================
+import time as _time
+
+_WS_CACHE: dict = {}          # key -> (worksheet, timestamp)
+_WS_TTL = 120                 # segundos
+
+_CFG_CACHE: dict = {}         # sheet_name -> (cfg_dict, timestamp)
+_CFG_TTL = 60                 # config se refresca cada 60 segundos
+
+_HMAP_CACHE: dict = {}        # tab_name -> (hmap, timestamp)
+_HMAP_TTL = 120
+
+
+def _get_worksheet(sh, tab_name: str):
+    """Devuelve worksheet cacheado por tab_name."""
+    now = _time.time()
+    if tab_name in _WS_CACHE:
+        ws, ts = _WS_CACHE[tab_name]
+        if now - ts < _WS_TTL:
+            return ws
+    ws = open_worksheet(sh, tab_name)
+    _WS_CACHE[tab_name] = (ws, now)
+    return ws
+
+
+def _get_config(ws_cfg) -> dict:
+    """Devuelve config cacheada. Se invalida cada _CFG_TTL segundos."""
+    now = _time.time()
+    key = TAB_CONFIG
+    if key in _CFG_CACHE:
+        cfg, ts = _CFG_CACHE[key]
+        if now - ts < _CFG_TTL:
+            return cfg
+    cfg = load_config(ws_cfg)
+    _CFG_CACHE[key] = (cfg, now)
+    return cfg
+
+
+def _get_hmap(ws_leads) -> dict:
+    """Devuelve header map cacheado para la hoja de leads."""
+    now = _time.time()
+    key = TAB_LEADS
+    if key in _HMAP_CACHE:
+        hmap, ts = _HMAP_CACHE[key]
+        if now - ts < _HMAP_TTL:
+            return hmap
+    hmap = build_header_map(ws_leads)
+    _HMAP_CACHE[key] = (hmap, now)
+    return hmap
+
+
+# =========================
 # Helpers
 # =========================
 def now_iso():
@@ -136,30 +189,32 @@ def _parse_opciones_validas(v) -> list:
         return []
     return [x.strip() for x in s.split(",") if x.strip()]
 
-def ensure_lead(ws_leads, from_phone: str):
+def ensure_lead(ws_leads, from_phone: str, hmap: dict):
+    """
+    Recibe hmap ya calculado para no volver a leer los headers.
+    """
     phone_norm = re.sub(r"\D+", "", (from_phone or "").replace("whatsapp:", ""))
-    h = build_header_map(ws_leads)
 
-    row = find_row_by_value(ws_leads, "Telefono_Normalizado", phone_norm, hmap=h)
+    row = find_row_by_value(ws_leads, "Telefono_Normalizado", phone_norm, hmap=hmap)
     if row:
         vals = with_backoff(ws_leads.row_values, row)
 
         def get(name):
-            c = col_idx(h, name)
+            c = col_idx(hmap, name)
             return (vals[c-1] if c and c-1 < len(vals) else "").strip()
 
         lead_id = get("ID_Lead") or ""
         if not lead_id:
             lead_id = uuid.uuid4().hex[:12]
-            update_row_cells(ws_leads, row, {"ID_Lead": lead_id}, hmap=h)
+            update_row_cells(ws_leads, row, {"ID_Lead": lead_id}, hmap=hmap)
 
-        return row, lead_id, phone_norm, h
+        return row, lead_id, phone_norm
 
     lead_id = uuid.uuid4().hex[:12]
-    new_row = [""] * len(h)
+    new_row = [""] * len(hmap)
 
     def setv(name, val):
-        c = col_idx(h, name)
+        c = col_idx(hmap, name)
         if c:
             new_row[c-1] = str(val)
 
@@ -172,10 +227,10 @@ def ensure_lead(ws_leads, from_phone: str):
     setv("ESTATUS",              "INICIO")
 
     with_backoff(ws_leads.append_row, new_row, value_input_option="USER_ENTERED")
-    row2 = find_row_by_value(ws_leads, "Telefono_Normalizado", phone_norm, hmap=h)
+    row2 = find_row_by_value(ws_leads, "Telefono_Normalizado", phone_norm, hmap=hmap)
     if not row2:
-        row2 = find_row_by_value(ws_leads, "ID_Lead", lead_id, hmap=h)
-    return row2, lead_id, phone_norm, h
+        row2 = find_row_by_value(ws_leads, "ID_Lead", lead_id, hmap=hmap)
+    return row2, lead_id, phone_norm
 
 def read_lead_row(ws_leads, row_num: int, hmap):
     vals = with_backoff(ws_leads.row_values, row_num)
@@ -218,14 +273,21 @@ def whatsapp_webhook():
             app.logger.error("[CONFIG] Falta GOOGLE_SHEET_NAME.")
             return twiml("Estamos en mantenimiento (configuración). Intenta de nuevo en unos minutos 🙏")
 
-        sh       = open_spreadsheet(GOOGLE_SHEET_NAME)
-        ws_leads = open_worksheet(sh, TAB_LEADS)
-        ws_logs  = open_worksheet(sh, TAB_LOGS)
-        ws_cfg   = open_worksheet(sh, TAB_CONFIG)
+        # ── Abrir spreadsheet (cacheado en sheets.py) ──
+        sh = open_spreadsheet(GOOGLE_SHEET_NAME)
 
-        cfg = load_config(ws_cfg)
+        # ── Abrir worksheets (cacheados localmente) ──
+        ws_leads = _get_worksheet(sh, TAB_LEADS)
+        ws_logs  = _get_worksheet(sh, TAB_LOGS)
+        ws_cfg   = _get_worksheet(sh, TAB_CONFIG)
 
-        lead_row, lead_id, phone_norm, h = ensure_lead(ws_leads, from_phone)
+        # ── Config cacheada (1 lectura cada 60s en lugar de en cada mensaje) ──
+        cfg = _get_config(ws_cfg)
+
+        # ── Header map cacheado (1 lectura cada 120s) ──
+        h = _get_hmap(ws_leads)
+
+        lead_row, lead_id, phone_norm = ensure_lead(ws_leads, from_phone, hmap=h)
         if not lead_row:
             return twiml("Perdón, tuve un problema técnico al registrar tu caso 🙏 Intenta de nuevo.")
 
@@ -432,11 +494,6 @@ def whatsapp_webhook():
             update_row_cells(ws_leads, lead_row, upd, hmap=h)
 
             # ── HOOK Abogados_Admin: se dispara en cuanto el lead da su nombre ──
-            # En ese momento ya tenemos nombre + teléfono, que son los únicos datos
-            # disponibles si el lead abandona antes de terminar el flujo.
-            # Crea la fila con ID_Abogado=A01 y Estatus="No Asignado".
-            # Si el lead completa el flujo, process_lead la actualizará con la
-            # abogada real y Estatus="ASIGNADO".
             if campo == "Nombre":
                 try:
                     from worker_jobs import register_lead_inicial
@@ -444,7 +501,6 @@ def whatsapp_webhook():
                         sh=sh,
                         lead_id=lead_id,
                         nombre_cliente=msg_in_raw.strip(),
-                        # phone_norm ya viene sin '+' de ensure_lead (solo dígitos)
                         telefono_raw=phone_norm,
                     )
                     app.logger.info(
@@ -452,7 +508,6 @@ def whatsapp_webhook():
                         f"lead_id={lead_id} nombre={msg_in_raw.strip()}"
                     )
                 except Exception as e_reg:
-                    # Error no crítico: no interrumpe el flujo del bot
                     app.logger.warning(
                         f"[ABOG_ADMIN] Fallo en registro inicial "
                         f"lead_id={lead_id}: {type(e_reg).__name__}: {e_reg}"
@@ -527,9 +582,9 @@ def api_report():
 
     try:
         sh       = open_spreadsheet(GOOGLE_SHEET_NAME)
-        ws_leads = open_worksheet(sh, TAB_LEADS)
+        ws_leads = _get_worksheet(sh, TAB_LEADS)
 
-        h       = build_header_map(ws_leads)
+        h       = _get_hmap(ws_leads)
         row_num = find_row_by_value(ws_leads, "Token_Reporte", token, hmap=h)
         if not row_num:
             return _cors_json({"ok": False, "error": "token_not_found"}, 404)
@@ -598,7 +653,7 @@ def reporte():
         return ("Falta GOOGLE_SHEET_NAME.", 500)
 
     sh       = open_spreadsheet(GOOGLE_SHEET_NAME)
-    ws_leads = open_worksheet(sh, TAB_LEADS)
+    ws_leads = _get_worksheet(sh, TAB_LEADS)
     values   = get_all_values_safe(ws_leads)
 
     idx = None
