@@ -1262,7 +1262,9 @@ def process_lead(lead_id: str) -> dict:
             tipo_h    = "Despido" if str(tipo_caso).strip() == "1" else (
                          "Renuncia" if str(tipo_caso).strip() == "2" else "Caso")
             total_txt = f"${total_estimado:,.2f} MXN"
-            detalle   = f"Tipo: {tipo_h} Total: {total_txt} Reporte: {link_reporte or ''}"
+            # Los despidos son los que más convierten (14 de 15 asesorías aceptadas, abr-nov 2026).
+            prioridad = "⭐ PRIORIDAD ALTA · " if tipo_h == "Despido" else ""
+            detalle   = f"{prioridad}Tipo: {tipo_h} Total: {total_txt} Reporte: {link_reporte or ''}"
 
             okA, detA = send_whatsapp_template_safe(
                 to_number=abogado_tel,

@@ -17,7 +17,10 @@ from utils.sheets import (
     build_header_map, col_idx, find_row_by_value, update_row_cells,
     get_all_values_safe, row_to_dict, find_row_by_col_value
 )
-from utils.text import normalize_option, render_text, detect_fuente, tipo_caso_por_texto
+from utils.text import (
+    normalize_option, render_text, detect_fuente, tipo_caso_por_texto,
+    parse_fecha_laboral, parse_salario, fin_antes_de_inicio, _int_o_none,
+)
 
 # =========================
 # Timezone / ENV
@@ -494,6 +497,50 @@ def whatsapp_webhook():
 
         # ====== TEXTO ======
         if t == "TEXTO":
+            # ── Fechas y salario en lenguaje natural ("marzo 2020", "23/02/2018", "10 mil", "408 al día") ──
+            if estatus in ("INI_ANIO", "INI_MES", "FIN_ANIO", "FIN_MES"):
+                ahora = datetime.now(MX_TZ)
+                es_fin = estatus.startswith("FIN")
+                anio, mes = parse_fecha_laboral(msg_in_raw, ahora.year, ahora.month, es_fin=es_fin)
+                pref = "Fin" if es_fin else "Inicio"
+                fa = anio if estatus.endswith("_ANIO") else _int_o_none(lead.get("Fin_Anio"))
+                if es_fin and fin_antes_de_inicio(lead.get("Inicio_Anio"), lead.get("Inicio_Mes"), fa, mes):
+                    # Fin anterior al inicio: el cálculo fallaría. Se vuelven a pedir las fechas desde el inicio.
+                    update_row_cells(ws_leads, lead_row, {
+                        "Paso_Anterior": estatus, "ESTATUS": "INI_ANIO", "Ultima_Actualizacion": now_iso(),
+                    }, hmap=h)
+                    out = ("La fecha de término queda *antes* de la fecha de inicio 🤔\n"
+                           "Revisemos las fechas otra vez.\n\n" + (get_text(cfg.get("INI_ANIO", {})) or
+                           "¿En qué año iniciaste tu trabajo? (ej. 2021)"))
+                    log(ws_logs, lead_id, "INI_ANIO", msg_in_raw, out, telefono=from_phone, err="fecha_incoherente")
+                    return twiml(out)
+                if estatus.endswith("_ANIO") and anio and mes:
+                    paso_mes = "FIN_MES" if es_fin else "INI_MES"
+                    nxt = (cfg.get(paso_mes, {}).get("Siguiente_Si_1") or "").strip()
+                    if nxt:
+                        update_row_cells(ws_leads, lead_row, {
+                            "Paso_Anterior": estatus, "ESTATUS": nxt, "Ultima_Actualizacion": now_iso(),
+                            f"{pref}_Anio": str(anio), f"{pref}_Mes": str(mes),
+                        }, hmap=h)
+                        out = get_text(cfg.get(nxt, {})) or "Gracias. Continuemos…"
+                        out = out.replace("{Nombre}", nombre or "")
+                        log(ws_logs, lead_id, nxt, msg_in_raw, out, telefono=from_phone)
+                        return twiml(out)
+                if estatus.endswith("_ANIO") and anio:
+                    msg_in_raw = str(anio)
+                elif estatus.endswith("_MES") and mes:
+                    msg_in_raw = str(mes)
+            elif estatus == "SALARIO":
+                monto, motivo = parse_salario(msg_in_raw)
+                if monto:
+                    msg_in_raw = str(int(round(monto)))
+                elif motivo == "fuera_de_rango":
+                    out = ("Ese monto no parece un salario mensual 🤔\n"
+                           "Escribe cuánto ganabas *al mes* en pesos, por ejemplo: 12000\n"
+                           "(Si te pagaban por día o por semana, puedes escribir \"400 al día\" o \"2500 a la semana\").")
+                    log(ws_logs, lead_id, estatus, msg_in_raw, out, telefono=from_phone, err="salario_fuera_de_rango")
+                    return twiml(out)
+
             regla = (row_cfg.get("Regla_Validacion") or "").strip()
             ok = True
             if regla.upper() == "MONEY":
