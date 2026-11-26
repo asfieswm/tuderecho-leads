@@ -402,6 +402,18 @@ def whatsapp_webhook():
             return twiml(out)
 
         row_cfg = cfg.get(estatus)
+
+        # ── Lead que ya terminó el flujo y vuelve a escribir: no reiniciarlo ──
+        if not row_cfg and estatus in ("CLIENTE_MENU", "SOLICITAR_LLAMADA"):
+            out = get_text(cfg.get("CLIENTE_SEGUIMIENTO", {})) or (
+                "Gracias por escribir{coma_nombre} 🙏\n\n"
+                "Tu caso ya está registrado y un abogado de nuestro equipo te contactará por este medio.\n\n"
+                "Si tienes una duda o algo nuevo que contarnos, escríbelo aquí y se lo hacemos llegar."
+            )
+            out = out.replace("{coma_nombre}", f", {nombre}" if nombre else "").replace("{Nombre}", nombre or "")
+            log(ws_logs, lead_id, estatus, msg_in_raw, out, telefono=from_phone, err="mensaje_post_flujo")
+            return twiml(out)
+
         if not row_cfg:
             update_row_cells(ws_leads, lead_row, {"ESTATUS": "INICIO"}, hmap=h)
             out = get_text(cfg.get("INICIO", {})) or "Hola, soy Ximena.\n\n1️⃣ Sí\n2️⃣ No"
