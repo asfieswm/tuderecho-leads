@@ -35,10 +35,48 @@ WA_TPL_ABOGADA_NUEVO_CASO_SID = os.environ.get("WA_TPL_ABOGADA_NUEVO_CASO_SID", 
 OPENAI_API_KEY  = os.environ.get("OPENAI_API_KEY",  "").strip()
 OPENAI_MODEL    = os.environ.get("OPENAI_MODEL",    "gpt-4o-mini").strip()
 
+# Proveedor de IA: "openai" (default) o "kimi" (Moonshot AI, compatible con el SDK de OpenAI).
+# Para Kimi basta con IA_PROVEEDOR=kimi y KIMI_API_KEY; modelo y URL tienen default.
+IA_PROVEEDOR    = os.environ.get("IA_PROVEEDOR", "openai").strip().lower()
+KIMI_API_KEY    = os.environ.get("KIMI_API_KEY", "").strip()
+KIMI_MODEL      = os.environ.get("KIMI_MODEL", "kimi-k3.1-pro").strip()
+KIMI_BASE_URL   = os.environ.get("KIMI_BASE_URL", "https://api.moonshot.ai/v1").strip()
+
 try:
     from openai import OpenAI
 except Exception:
     OpenAI = None
+
+
+def _ia_disponible() -> bool:
+    if OpenAI is None:
+        return False
+    if IA_PROVEEDOR == "kimi":
+        return bool(KIMI_API_KEY)
+    return bool(OPENAI_API_KEY)
+
+
+def _ia_chat(messages, temperature: float, max_tokens: int, effort: str = "low") -> str:
+    """Una llamada de chat al proveedor configurado. Devuelve el texto o '' si no hay respuesta.
+    Kimi (modelos de razonamiento) no recibe temperature; el tope de tokens incluye el
+    razonamiento, por eso se amplía para que no se quede sin texto visible."""
+    if IA_PROVEEDOR == "kimi":
+        client = OpenAI(api_key=KIMI_API_KEY, base_url=KIMI_BASE_URL, timeout=60)
+        resp = client.chat.completions.create(
+            model=KIMI_MODEL,
+            messages=messages,
+            max_completion_tokens=max_tokens * 6,
+            extra_body={"reasoning_effort": effort},
+        )
+    else:
+        client = OpenAI(api_key=OPENAI_API_KEY, timeout=60)
+        resp = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+    return (resp.choices[0].message.content or "").strip()
 
 
 # ─────────────────────────────────────────────
@@ -642,14 +680,13 @@ def build_respuesta_empatica(
             )
         return cuerpo + "Para poder perfilar tu caso exacto, solo confírmame:\n\n¿Fue un despido (1) o presentaste tu renuncia (2)?"
 
-    if not (OPENAI_API_KEY and OpenAI):
+    if not _ia_disponible():
+        print(f"[IA] Sin IA disponible (proveedor={IA_PROVEEDOR}); respuesta empática fija")
         return fallback()
 
     desc_recortada = _clip_chars(descripcion, 800)
 
     try:
-        client = OpenAI(api_key=OPENAI_API_KEY)
-
         system_prompt = (
             "Eres Ximena, asistente legal de Tu Derecho Laboral México. "
             "Atiendes por WhatsApp a personas que acaban de vivir un problema laboral. "
@@ -703,18 +740,16 @@ def build_respuesta_empatica(
             "pregunta incisiva para obtener más. Nunca suenes genérica."
         )
 
-        resp = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[
+        txt = _ia_chat(
+            [
                 {"role": "system", "content": system_prompt},
                 {"role": "user",   "content": user_prompt},
             ],
             temperature=0.85,   # más creatividad / personalización
             max_tokens=380,     # un poco más de espacio para el detalle
         )
-
-        txt = (resp.choices[0].message.content or "").strip()
         if not txt:
+            print(f"[IA] Respuesta empática vacía (proveedor={IA_PROVEEDOR}); se usa la fija")
             return fallback()
 
         # Garantizar que la pregunta de cierre siempre esté presente
@@ -724,7 +759,8 @@ def build_respuesta_empatica(
 
         return txt
 
-    except Exception:
+    except Exception as e:
+        print(f"[IA] Error en respuesta empática (proveedor={IA_PROVEEDOR}): {type(e).__name__}: {e}")
         return fallback()
 
 
@@ -814,7 +850,8 @@ def build_analisis_web_gpt(
             txt = _clip_words(txt, 285)
         return txt + "\n\nOrientación informativa; no constituye asesoría legal definitiva."
 
-    if not (OPENAI_API_KEY and OpenAI):
+    if not _ia_disponible():
+        print(f"[IA] Sin IA disponible (proveedor={IA_PROVEEDOR}); análisis fijo")
         return fallback()
 
     contexto_items = []
@@ -832,8 +869,6 @@ def build_analisis_web_gpt(
     )
 
     try:
-        client = OpenAI(api_key=OPENAI_API_KEY)
-
         messages = [
             {
                 "role": "system",
@@ -870,15 +905,9 @@ def build_analisis_web_gpt(
             },
         ]
 
-        resp = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=messages,
-            temperature=0.6,
-            max_tokens=800,
-        )
-
-        txt = (resp.choices[0].message.content or "").strip()
+        txt = _ia_chat(messages, temperature=0.6, max_tokens=800)
         if not txt:
+            print(f"[IA] Análisis vacío (proveedor={IA_PROVEEDOR}); se usa el fijo")
             return fallback()
 
         txt = re.sub(r"(?is)\n*orientación informativa;.*$", "", txt).strip()
@@ -890,7 +919,8 @@ def build_analisis_web_gpt(
 
         return txt + "\n\nOrientación informativa; no constituye asesoría legal definitiva."
 
-    except Exception:
+    except Exception as e:
+        print(f"[IA] Error en análisis (proveedor={IA_PROVEEDOR}): {type(e).__name__}: {e}")
         return fallback()
 
 
