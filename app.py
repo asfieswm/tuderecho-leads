@@ -17,7 +17,7 @@ from utils.sheets import (
     build_header_map, col_idx, find_row_by_value, update_row_cells,
     get_all_values_safe, row_to_dict, find_row_by_col_value
 )
-from utils.text import normalize_option, render_text, detect_fuente
+from utils.text import normalize_option, render_text, detect_fuente, tipo_caso_por_texto
 
 # =========================
 # Timezone / ENV
@@ -306,7 +306,7 @@ def whatsapp_webhook():
         # ── Fuente (solo si aún es desconocida) ──
         fuente_actual = (lead.get("Fuente_Lead") or "DESCONOCIDA").strip()
         if fuente_actual == "DESCONOCIDA":
-            fuente_actual = detect_fuente(msg_in_raw)
+            fuente_actual = detect_fuente(msg_in_raw, request.form)
 
         update_row_cells(ws_leads, lead_row, {
             "Ultimo_Mensaje_Cliente": msg_in_raw,
@@ -359,6 +359,8 @@ def whatsapp_webhook():
         # INTERCEPCIÓN: AI_EMPATIA
         # ==========================================================
         if estatus == "AI_EMPATIA":
+            if msg_opt not in ("1", "2"):
+                msg_opt = tipo_caso_por_texto(msg_in_raw)   # "me despidieron" → 1, "renuncié" → 2
             if msg_opt in ("1", "2"):
                 nxt_emp = "NOMBRE"
                 update_row_cells(ws_leads, lead_row, {
@@ -382,6 +384,18 @@ def whatsapp_webhook():
 
         # ── INICIO sin opción válida → reenviar INICIO ──
         if estatus == "INICIO" and msg_opt not in ("1", "2"):
+            # Si ya recibió la bienvenida y ahora cuenta su caso, no repetir el menú en seco:
+            # reconocer el mensaje (fila INICIO_RELATO de la hoja, si existe) y pedir el 1 o 2.
+            ya_saludado = bool((lead.get("Ultimo_Mensaje_Cliente") or "").strip())
+            if ya_saludado and len(msg_in_raw.split()) >= 4:
+                out = get_text(cfg.get("INICIO_RELATO", {})) or (
+                    "Gracias por contármelo. Para revisar tu caso y calcular lo que te corresponde, "
+                    "primero necesito que me confirmes que quieres continuar.\n\n"
+                    "Responde 1 para continuar o 2 si prefieres no seguir."
+                )
+                out = out.replace("{Nombre}", nombre or "")
+                log(ws_logs, lead_id, "INICIO", msg_in_raw, out, telefono=from_phone, err="relato_en_inicio")
+                return twiml(out)
             out = get_text(cfg.get("INICIO", {})) or "Hola, soy Ximena.\n\n1️⃣ Sí\n2️⃣ No"
             out = out.replace("{Nombre}", nombre or "")
             log(ws_logs, lead_id, "INICIO", msg_in_raw, out, telefono=from_phone)
